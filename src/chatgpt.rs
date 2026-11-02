@@ -140,6 +140,7 @@ fn verify_with_keys(
     policy.set_issuer(&[ISSUER]);
     policy.set_audience(&[client_id]);
     policy.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
+    policy.validate_nbf = true;
     let claims = jsonwebtoken::decode::<Claims>(token, &DecodingKey::from_jwk(jwk)?, &policy)
         .context("ChatGPT ID token could not be verified")?
         .claims;
@@ -661,6 +662,9 @@ mod tests {
         assert!(verify_with_keys(&token, "oaiapp_test", Some("wrong"), &keys).is_err());
         for (field, value) in [
             ("exp", json!(now() - 300)),
+            ("exp", json!("99999999999")),
+            ("nbf", json!(now() + 300)),
+            ("nbf", json!("99999999999")),
             ("iss", json!("https://example.com")),
             ("sub", json!("")),
         ] {
