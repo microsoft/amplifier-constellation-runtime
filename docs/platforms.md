@@ -27,3 +27,7 @@ Workspaces must use ordinary local Unicode drive paths shorter than 240 characte
 Temporary ACL entries use a unique per-command SID. Cleanup preserves unrelated entries and inheritance, visits verified new descendants, and never follows reparse points. Concurrent host edits can introduce entries that cannot be safely cleaned. A successful result includes `cleanup_incomplete` if any entries could not be verified; an interrupted/failed run reports the same issue to the runtime log. Safe siblings are still cleaned and the temporary AppContainer profile is removed. Original access, new-file cleanup, startup failure, and a concurrent host-created junction are covered by native checks.
 
 Mobile devices remain clients of an installed agent; this package does not imply an unrestricted background server on iOS or Android.
+
+On macOS, command arguments should use canonical workspace paths. An OS alias
+such as `/var` for `/private/var` can be outside the command isolation grant even
+when it identifies the same directory; use the session's canonical root.

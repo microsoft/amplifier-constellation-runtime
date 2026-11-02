@@ -8,9 +8,12 @@ async fn commands_follow_the_current_sessions_root_grant() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    let primary = dir.path().join("primary");
-    let shared = dir.path().join("shared");
-    let excluded = dir.path().join("excluded");
+    // Session grants use canonical paths. On macOS the temporary-directory
+    // spelling can pass through /var, an alias outside the Seatbelt grant.
+    let canonical = std::fs::canonicalize(dir.path()).unwrap();
+    let primary = canonical.join("primary");
+    let shared = canonical.join("shared");
+    let excluded = canonical.join("excluded");
     for root in [&primary, &shared, &excluded] {
         std::fs::create_dir(root).unwrap();
     }
@@ -25,12 +28,10 @@ async fn commands_follow_the_current_sessions_root_grant() {
         )
         .unwrap();
     let read = json!({"command":"/bin/cat","args":[shared.join("data")]});
-    assert_eq!(
-        tools::call(&session, &primary, "workspace_run", &read)
-            .await
-            .unwrap()["stdout"],
-        "shared-visible"
-    );
+    let result = tools::call(&session, &primary, "workspace_run", &read)
+        .await
+        .unwrap();
+    assert_eq!(result["stdout"], "shared-visible", "{result}");
     let result = tools::call(
         &session,
         &primary,
