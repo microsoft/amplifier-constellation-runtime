@@ -1,0 +1,14 @@
+/target/
+/private/
+node_modules/
+__pycache__/
+*.pyc
+
+# Local installations and publication review material
+private/
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite3
+*.db

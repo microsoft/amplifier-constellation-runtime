@@ -1,0 +1,8 @@
+{
+  "image_input": true,
+  "disable_function_tools": true,
+  "response_modalities": [
+    "TEXT",
+    "IMAGE"
+  ]
+}

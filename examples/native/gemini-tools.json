@@ -1,0 +1,15 @@
+{
+  "image_input": true,
+  "audio_input": true,
+  "tools": [
+    {
+      "googleSearch": {}
+    },
+    {
+      "urlContext": {}
+    },
+    {
+      "codeExecution": {}
+    }
+  ]
+}

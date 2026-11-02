@@ -1,0 +1,114 @@
+[
+  {
+    "name": "music_complete",
+    "goal": "Coordinate a creative project with peers",
+    "condition": "Rae provides the finished ambient sound concept for the courtyard, or explicitly abandons that assignment.",
+    "events": [
+      {
+        "id": "new",
+        "kind": "message",
+        "source": "Public report by peer",
+        "content": "Rae: The ambience design is finished: wind chimes with a brief bell when visitors arrive. It is ready for your assessment."
+      }
+    ],
+    "wake": true
+  },
+  {
+    "name": "music_future",
+    "goal": "Coordinate a creative project with peers",
+    "condition": "Rae provides the finished ambient sound concept for the courtyard, or explicitly abandons that assignment.",
+    "events": [
+      {
+        "id": "new",
+        "kind": "message",
+        "source": "Public report by peer",
+        "content": "Rae: I can finish the ambience design after lunch; please wait for the finished concept."
+      }
+    ],
+    "wake": false
+  },
+  {
+    "name": "identity_mismatch",
+    "goal": "Coordinate a creative project with peers",
+    "condition": "Jo confirms the final landing layout is approved.",
+    "events": [
+      {
+        "id": "new",
+        "kind": "message",
+        "source": "Public report by peer",
+        "content": "Lee: I approve the landing layout. Jo has not reviewed it yet."
+      }
+    ],
+    "wake": false
+  },
+  {
+    "name": "negated_approval",
+    "goal": "Coordinate a creative project with peers",
+    "condition": "Jo confirms the final landing layout is approved.",
+    "events": [
+      {
+        "id": "new",
+        "kind": "message",
+        "source": "Public report by peer",
+        "content": "Jo: I cannot approve the landing layout until its edge has a guard."
+      }
+    ],
+    "wake": false
+  },
+  {
+    "name": "withdrawn_dependency",
+    "goal": "Coordinate a creative project with peers",
+    "condition": "Dev reports the icon set completed or withdrawn.",
+    "events": [
+      {
+        "id": "new",
+        "kind": "message",
+        "source": "Public report by peer",
+        "content": "Dev: We abandoned the icon set. The new text-only direction means your icon review can be closed."
+      }
+    ],
+    "wake": true
+  },
+  {
+    "name": "changed_constraint",
+    "goal": "Coordinate a creative project with peers",
+    "condition": "Casey identifies a concrete new constraint requiring me to rethink the visitor activity.",
+    "events": [
+      {
+        "id": "new",
+        "kind": "message",
+        "source": "Public report by peer",
+        "content": "Casey: I tried it on the narrow entrance route. Visitors cannot pass each other there, so the two-person race needs a different approach."
+      }
+    ],
+    "wake": true
+  },
+  {
+    "name": "no_new_constraint",
+    "goal": "Coordinate a creative project with peers",
+    "condition": "Casey identifies a concrete new constraint requiring me to rethink the visitor activity.",
+    "events": [
+      {
+        "id": "new",
+        "kind": "message",
+        "source": "Public report by peer",
+        "content": "Casey: Thanks for working on it. I have no new constraints to report."
+      }
+    ],
+    "wake": false
+  },
+  {
+    "name": "artifact_specific",
+    "goal": "Coordinate a creative project with peers",
+    "condition": "Robin supplies a tested result for the new map, or cancels the map work.",
+    "events": [
+      {
+        "id": "new",
+        "kind": "message",
+        "source": "Public report by peer",
+        "content": "Robin: The old brochure has passed review. I have not tested the new map."
+      }
+    ],
+    "wake": false
+  }
+]

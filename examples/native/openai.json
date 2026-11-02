@@ -1,0 +1,18 @@
+{
+  "image_input": true,
+  "tools": [
+    {
+      "type": "image_generation",
+      "quality": "low"
+    },
+    {
+      "type": "web_search"
+    },
+    {
+      "type": "code_interpreter",
+      "container": {
+        "type": "auto"
+      }
+    }
+  ]
+}

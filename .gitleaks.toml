@@ -1,0 +1,7 @@
+title = "Public source test fixtures"
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Deliberately public signing key used only by synthetic OIDC tests"
+paths = ['''^tests/fixtures/oidc-test-private\.pem$''']

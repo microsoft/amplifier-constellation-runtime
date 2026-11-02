@@ -1,0 +1,13 @@
+{
+  "disable_function_tools": true,
+  "response_modalities": [
+    "AUDIO"
+  ],
+  "speech_config": {
+    "voiceConfig": {
+      "prebuiltVoiceConfig": {
+        "voiceName": "Kore"
+      }
+    }
+  }
+}

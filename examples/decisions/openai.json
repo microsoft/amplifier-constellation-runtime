@@ -1,0 +1,8 @@
+{
+  "name": "routing",
+  "provider": "openai",
+  "endpoint": "https://api.openai.com/v1/decisions",
+  "model": "gpt-6-luna",
+  "api_key_env": "OPENAI_API_KEY",
+  "expose_to_agent": true
+}

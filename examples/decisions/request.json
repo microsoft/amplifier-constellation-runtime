@@ -1,0 +1,41 @@
+{
+  "state": {
+    "message": "Could the project lead summarize the blockers?",
+    "participants": [
+      "lead",
+      "builder"
+    ]
+  },
+  "questions": [
+    {
+      "type": "predicate",
+      "name": "addressed",
+      "instructions": "Does the message request an agent response?"
+    },
+    {
+      "type": "choice",
+      "name": "respondent",
+      "instructions": "Which participant is best placed to respond?",
+      "choices": [
+        {
+          "value": "lead",
+          "description": "Coordinates project status and blockers."
+        },
+        {
+          "value": "builder",
+          "description": "Implements assigned tasks."
+        }
+      ]
+    },
+    {
+      "type": "score",
+      "name": "urgency",
+      "instructions": "How time-sensitive is the requested response?",
+      "levels": [
+        "Can wait",
+        "Routine",
+        "Immediate"
+      ]
+    }
+  ]
+}
