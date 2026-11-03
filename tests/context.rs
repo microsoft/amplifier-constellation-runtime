@@ -37,8 +37,8 @@ fn large_archives_compact_without_discarding_original_messages() {
 fn small_media_estimate_does_not_bypass_serialized_request_limit() {
     let image = json!({"type":"input_image","image_url":format!("data:image/png;base64,{}", "A".repeat(49 * 1024 * 1024))});
     let current = json!({"role":"user","content":[image]});
-    assert!(agent_runtime::media::context_bytes(&[current.clone()]).unwrap() < 16000);
-    assert!(prepare(&[current.clone()], &Policy::default(), 16000).is_err());
+    assert!(agent_runtime::media::context_bytes(std::slice::from_ref(&current)).unwrap() < 16000);
+    assert!(prepare(std::slice::from_ref(&current), &Policy::default(), 16000).is_err());
     let items = vec![current, json!({"role":"user","content":"New task"})];
     let view = prepare(&items, &Policy::default(), 16000).unwrap();
     assert!(agent_runtime::media::request_fits(&view.items).unwrap());
