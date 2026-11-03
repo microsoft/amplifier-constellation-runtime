@@ -7,6 +7,44 @@ use agent_runtime::{
 use serde_json::json;
 
 #[test]
+fn large_archives_compact_without_discarding_original_messages() {
+    let items = vec![
+        json!({"role":"user","content":"archived detail ".repeat(3_500_000)}),
+        json!({"role":"assistant","content":"Previous work saved."}),
+        json!({"role":"user","content":"Inspect the remaining work."}),
+    ];
+    assert!(!agent_runtime::media::request_fits(&items).unwrap());
+    let original_len = items[0]["content"].as_str().unwrap().len();
+    let view = prepare(&items, &Policy::default(), 16000).unwrap();
+    assert!(agent_runtime::media::request_fits(&view.items).unwrap());
+    assert_eq!(view.items.last(), items.last());
+    assert_eq!(items[0]["content"].as_str().unwrap().len(), original_len);
+    assert_eq!(view.checkpoint.unwrap()["full_history_preserved"], true);
+    assert!(
+        prepare(
+            &items,
+            &Policy {
+                auto_compact: false,
+                ..Policy::default()
+            },
+            16000
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn small_media_estimate_does_not_bypass_serialized_request_limit() {
+    let image = json!({"type":"input_image","image_url":format!("data:image/png;base64,{}", "A".repeat(49 * 1024 * 1024))});
+    let current = json!({"role":"user","content":[image]});
+    assert!(agent_runtime::media::context_bytes(std::slice::from_ref(&current)).unwrap() < 16000);
+    assert!(prepare(std::slice::from_ref(&current), &Policy::default(), 16000).is_err());
+    let items = vec![current, json!({"role":"user","content":"New task"})];
+    let view = prepare(&items, &Policy::default(), 16000).unwrap();
+    assert!(agent_runtime::media::request_fits(&view.items).unwrap());
+}
+
+#[test]
 fn compaction_preserves_native_tool_pairs_and_complete_original_history() {
     let mut items = vec![];
     for i in 0..8 {

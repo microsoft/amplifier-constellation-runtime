@@ -189,7 +189,8 @@ pub fn pdf(part: &Value) -> Result<&str> {
         .context("Expected an inline PDF file")
 }
 // The model context budget counts media separately from base64 storage. A
-// separate hard history cap bounds storage and request sizes as well.
+// The serialized request cap is checked on the selected model view, not on the
+// durable archive: otherwise reaching that cap prevents compaction itself.
 pub fn context_bytes(items: &[Value]) -> Result<usize> {
     fn count(v: &Value) -> usize {
         match v {
@@ -223,11 +224,11 @@ pub fn context_bytes(items: &[Value]) -> Result<usize> {
             _ => 8,
         }
     }
-    ensure!(
-        serde_json::to_vec(items)?.len() <= 48 * 1024 * 1024,
-        "Session reached its media history limit; start a new focused session"
-    );
     Ok(items.iter().map(count).sum())
+}
+
+pub fn request_fits(items: &[Value]) -> Result<bool> {
+    Ok(serde_json::to_vec(items)?.len() <= 48 * 1024 * 1024)
 }
 fn text(s: impl Into<String>) -> Value {
     json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":s.into()}})

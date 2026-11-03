@@ -6,6 +6,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get('AGENT_RUNTIME_TEST_BINARY', str(ROOT / ('target/debug/agent-runtime.exe' if os.name == 'nt' else 'target/debug/agent-runtime'))))
 REQUESTS = []
+CLOSE_STARTED = threading.Event()
+CLOSE_RELEASE = threading.Event()
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_): pass
@@ -20,7 +22,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(401);self.end_headers();return
         REQUESTS.append(body)
         messages=body['input'];last_user=max(i for i,x in enumerate(messages) if x.get('role')=='user');text=messages[last_user]['content'];tail=messages[last_user+1:]
-        if 'slow' in text:time.sleep(2)
+        if text == 'hold-for-close':
+            CLOSE_STARTED.set();CLOSE_RELEASE.wait(10)
+        elif 'slow' in text:time.sleep(2)
         output=[]
         if any(x.get('type')=='function_call_output' for x in tail):
             text='Tool result: '+next(x['output'] for x in tail if x.get('type')=='function_call_output')
@@ -45,7 +49,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if output[0]['type']=='message':self.wfile.write(('data: '+json.dumps({'type':'response.output_text.delta','delta':text})+'\n\n').encode())
             self.wfile.write(('data: '+json.dumps({'type':'response.completed','response':{'status':'completed','output':output,'usage':{'input_tokens':10,'output_tokens':20}}})+'\n\n').encode());self.wfile.flush()
-        except (BrokenPipeError,ConnectionResetError):pass
+        except (BrokenPipeError,ConnectionResetError,ConnectionAbortedError):pass
 
 class Client:
     def __init__(self,home):
@@ -172,14 +176,20 @@ class Tests(unittest.TestCase):
         self.assertIn('error',c.call('session/load',{'sessionId':s,'cwd':str(self.work),'mcpServers':[]}))
     def test_close_cancels_active_turn_and_delete_cannot_race_another_process(self):
         c=self.client();s=self.new(c);other=self.client()
-        p=c.request('session/prompt',{'sessionId':s,'prompt':[{'type':'text','text':'slow'}]});time.sleep(.15)
-        self.assertIn('error',other.call('session/delete',{'sessionId':s}))
-        close=c.request('session/close',{'sessionId':s});responses={}
-        while len(responses)<2:
-            msg=c.q.get(timeout=12)
-            if 'method' in msg:c.updates.append(msg)
-            else:responses[msg['id']]=msg
-        self.assertEqual(responses[p]['result']['stopReason'],'cancelled');self.assertEqual(responses[close]['result'],{})
+        CLOSE_STARTED.clear();CLOSE_RELEASE.clear()
+        p=c.request('session/prompt',{'sessionId':s,'prompt':[{'type':'text','text':'hold-for-close'}]})
+        try:
+            # Wait for actual model entry (and its held session lock), not a
+            # scheduling guess. Slow Windows runners can exceed 150 ms here.
+            self.assertTrue(CLOSE_STARTED.wait(5),'Prompt did not reach the held model fixture')
+            self.assertIn('error',other.call('session/delete',{'sessionId':s}))
+            close=c.request('session/close',{'sessionId':s});responses={}
+            while len(responses)<2:
+                msg=c.q.get(timeout=12)
+                if 'method' in msg:c.updates.append(msg)
+                else:responses[msg['id']]=msg
+            self.assertEqual(responses[p]['result']['stopReason'],'cancelled');self.assertEqual(responses[close]['result'],{})
+        finally:CLOSE_RELEASE.set()
         self.assertIn('error',self.prompt(c,s,'closed'))
     def test_native_history_is_public_bounded_and_store_bound(self):
         c=self.client();s=self.new(c)
