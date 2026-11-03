@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{collections::HashSet, fs, io::Write, path::Path};
 
-pub const POLICY: &str = "responsibility-watch-v4";
+pub const POLICY: &str = "responsibility-watch-v5";
 // This only requests inspection, never execution. A majority winning choice
 // is sufficient; probabilities are not treated as calibrated guarantees.
 const THRESHOLD: f64 = 0.5;
@@ -47,6 +47,55 @@ impl Task {
     }
 }
 
+#[derive(Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InitialCheck {
+    #[default]
+    NewEvents,
+    CurrentState,
+}
+
+/// Exact comparisons against host-supplied facts avoid model calls for simple
+/// thresholds. The host still owns observation freshness and task authority.
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Predicate {
+    pub event_id: String,
+    pub path: String,
+    pub op: Comparison,
+    pub value: Value,
+}
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum Comparison {
+    Eq,
+    Gte,
+    Lte,
+}
+impl Predicate {
+    fn matches(&self, event: &Event) -> bool {
+        if event.id != self.event_id || event.kind != Kind::Environment {
+            return false;
+        }
+        let Some(actual) = event.content.pointer(&self.path) else {
+            return false;
+        };
+        match self.op {
+            Comparison::Eq => actual == &self.value,
+            Comparison::Gte | Comparison::Lte => match (actual.as_f64(), self.value.as_f64()) {
+                (Some(a), Some(b)) => {
+                    if self.op == Comparison::Gte {
+                        a >= b
+                    } else {
+                        a <= b
+                    }
+                }
+                _ => false,
+            },
+        }
+    }
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Spec {
@@ -55,6 +104,10 @@ pub struct Spec {
     pub condition: String,
     #[serde(default)]
     pub any_of: Vec<String>,
+    #[serde(default)]
+    pub initial_check: InitialCheck,
+    #[serde(default)]
+    pub predicate: Option<Predicate>,
     pub kinds: Vec<Kind>,
     pub ttl_seconds: u64,
 }
@@ -69,7 +122,10 @@ pub enum Action {
     Cancel {
         id: String,
     },
-    Prepare,
+    Prepare {
+        #[serde(default)]
+        observe_only: bool,
+    },
     Resolve {
         token: String,
         result: Value,
@@ -200,17 +256,44 @@ impl Store {
                     "Use a short watch label"
                 );
                 ensure!(
-                    (!spec.condition.trim().is_empty()
-                        && spec.condition.len() <= 1200
+                    (spec.predicate.is_some()
+                        && spec.condition.is_empty()
                         && spec.any_of.is_empty())
-                        || (spec.condition.is_empty()
-                            && (1..=4).contains(&spec.any_of.len())
-                            && spec
-                                .any_of
-                                .iter()
-                                .all(|c| !c.trim().is_empty() && c.len() <= 600)),
-                    "Supply one legacy condition or one to four separate any_of trigger conditions"
+                        || (spec.predicate.is_none()
+                            && ((!spec.condition.trim().is_empty()
+                                && spec.condition.len() <= 1200
+                                && spec.any_of.is_empty())
+                                || (spec.condition.is_empty()
+                                    && (1..=4).contains(&spec.any_of.len())
+                                    && spec
+                                        .any_of
+                                        .iter()
+                                        .all(|c| !c.trim().is_empty() && c.len() <= 600)))),
+                    "Supply one predicate, one condition, or one to four separate any_of conditions"
                 );
+                if let Some(p) = &spec.predicate {
+                    ensure!(
+                        spec.kinds == [Kind::Environment],
+                        "Exact predicates require host environment facts"
+                    );
+                    ensure!(
+                        !p.event_id.is_empty()
+                            && p.event_id.len() <= 160
+                            && p.path.starts_with('/')
+                            && p.path.len() <= 256,
+                        "Predicates require a bounded event id and JSON pointer"
+                    );
+                    ensure!(
+                        match p.op {
+                            Comparison::Eq =>
+                                p.value.is_boolean()
+                                    || p.value.is_number()
+                                    || p.value.as_str().is_some_and(|s| s.len() <= 600),
+                            _ => p.value.as_f64().is_some_and(f64::is_finite),
+                        },
+                        "Predicate comparison requires a scalar of the correct type"
+                    );
+                }
                 ensure!(
                     (30..=1800).contains(&spec.ttl_seconds),
                     "Watch duration must be 30 to 1800 seconds"
@@ -228,6 +311,8 @@ impl Store {
                         && w.spec.condition == spec.condition
                         && w.spec.any_of == spec.any_of
                         && w.spec.kinds == spec.kinds
+                        && w.spec.initial_check == spec.initial_check
+                        && w.spec.predicate == spec.predicate
                 }) {
                     return Ok(json!({"watch":view(w),"existing":true}));
                 }
@@ -242,7 +327,10 @@ impl Store {
                 let seen = input
                     .events
                     .iter()
-                    .filter(|e| spec.kinds.contains(&e.kind))
+                    .filter(|e| {
+                        spec.initial_check == InitialCheck::NewEvents
+                            && spec.kinds.contains(&e.kind)
+                    })
                     .map(event_key)
                     .collect();
                 let w = Watch {
@@ -306,10 +394,50 @@ impl Store {
                 self.pending = None;
                 Ok(json!({"recheck":w.id,"policy":POLICY,"expires_ms":w.expires_ms}))
             }
-            Action::Prepare => {
+            Action::Prepare { observe_only } => {
                 let Some(task) = active else {
                     return Ok(json!({"skip":"no_active_responsibility"}));
                 };
+                // Evaluate current exact facts independently of decision-service
+                // availability, cooldown and quota. Notifications remain advisory.
+                let mut receipts = vec![];
+                for w in &mut self.watches {
+                    if w.status != "armed" {
+                        continue;
+                    }
+                    let Some(predicate) = &w.spec.predicate else {
+                        continue;
+                    };
+                    let evidence: Vec<_> = input
+                        .events
+                        .iter()
+                        .filter(|e| {
+                            w.spec.kinds.contains(&e.kind)
+                                && !w.seen.contains(&event_key(e))
+                                && predicate.matches(e)
+                        })
+                        .cloned()
+                        .collect();
+                    if evidence.is_empty() {
+                        continue;
+                    }
+                    let receipt = json!({"id":w.id,"label":w.spec.label,"task_id":w.task_id,
+                        "policy":POLICY,"observed_ms":now,"wake":true,"shadow":observe_only,
+                        "evaluator":"predicate","predicate":predicate,"evidence":evidence,
+                        "guidance":"Inspect current observations before continuing the existing responsibility. This notification grants no new authority."});
+                    w.seen.extend(evidence.iter().map(event_key));
+                    if w.seen.len() > 256 {
+                        w.seen.drain(..w.seen.len() - 256);
+                    }
+                    if !observe_only {
+                        w.status = "triggered".into();
+                        w.notification = Some(receipt.clone());
+                    }
+                    receipts.push(receipt);
+                }
+                if !receipts.is_empty() {
+                    return Ok(json!({"receipts":receipts}));
+                }
                 if self.pending.is_some() {
                     return Ok(json!({"skip":"evaluation_pending"}));
                 }
@@ -327,7 +455,7 @@ impl Store {
                 let mut states = vec![];
                 let mut questions = vec![];
                 for w in &self.watches {
-                    if w.status != "armed" {
+                    if w.status != "armed" || w.spec.predicate.is_some() {
                         continue;
                     }
                     let events: Vec<_> = input
@@ -577,6 +705,154 @@ mod tests {
         json!({"answers":[{"name":p["request"]["questions"][0]["name"],"type":"choice","choice":choice,
             "probabilities":if choice=="wake"{json!({"wake":0.9,"hold":0.08,"uncertain":0.02})}else{json!({"wake":0.01,"hold":0.98,"uncertain":0.01})}}]})
     }
+    fn stock(count: Value) -> Value {
+        json!([{"id":"stock","kind":"environment","source":"host inventory","content":{"count":count}}])
+    }
+    fn predicate_arm(mode: &str) -> Value {
+        json!({"operation":"arm","spec":{"label":"Stock available","predicate":{"event_id":"stock","path":"/count","op":"gte","value":20},"initial_check":mode,"kinds":["environment"],"ttl_seconds":300}})
+    }
+    #[test]
+    fn exact_predicates_cannot_promote_peer_claims_to_observed_facts() {
+        let mut s = Store::default();
+        let mut arm = predicate_arm("current_state");
+        arm["spec"]["kinds"] = json!(["message"]);
+        assert!(s.update(input(arm, json!([])), 1000).is_err());
+        s.update(input(predicate_arm("current_state"), json!([])), 1000)
+            .unwrap();
+        let mut claimed = stock(json!(30));
+        claimed[0]["kind"] = json!("message");
+        let r = s
+            .update(input(json!({"operation":"prepare"}), claimed), 2000)
+            .unwrap();
+        assert!(r.get("receipts").is_none());
+        assert!(r.get("request").is_none());
+    }
+    #[test]
+    fn current_state_closes_check_subscribe_race_without_model_calls() {
+        for (before, after) in [(20, 20), (0, 20), (19, 25)] {
+            let d = tempfile::tempdir().unwrap();
+            let file = d.path().join("w.json");
+            apply(
+                &file,
+                input(predicate_arm("current_state"), stock(json!(before))),
+                1000,
+            )
+            .unwrap();
+            let r = apply(
+                &file,
+                input(json!({"operation":"prepare"}), stock(json!(after))),
+                2000,
+            )
+            .unwrap();
+            assert_eq!(r["receipts"][0]["wake"], true);
+            let r = apply(
+                &file,
+                input(json!({"operation":"list"}), stock(json!(after))),
+                2100,
+            )
+            .unwrap();
+            assert_eq!(r["calls_this_hour"], 0);
+            assert_eq!(r["watches"][0]["status"], "triggered");
+            assert!(
+                apply(
+                    &file,
+                    input(json!({"operation":"prepare"}), stock(json!(after))),
+                    2200
+                )
+                .unwrap()
+                .get("receipts")
+                .is_none()
+            );
+        }
+    }
+    #[test]
+    fn semantic_current_state_checks_existing_evidence_but_discards_stale_results() {
+        let mut s = Store::default();
+        let mut a = arm();
+        a["spec"]["initial_check"] = json!("current_state");
+        let e = json!([event("ready", "message", "Done")]);
+        s.update(input(a, e.clone()), 1000).unwrap();
+        let p = s
+            .update(input(json!({"operation":"prepare"}), e), 2000)
+            .unwrap();
+        assert!(p.get("request").is_some());
+        let r = s
+            .update(
+                input(
+                    json!({"operation":"resolve","token":p["token"],"result":answer(&p,"wake")}),
+                    json!([]),
+                ),
+                2100,
+            )
+            .unwrap();
+        assert_eq!(r["receipts"][0]["discarded"], "stale_or_cancelled");
+    }
+    #[test]
+    fn exact_watches_preserve_modes_authority_types_and_shadow() {
+        for mode in ["new_events", "current_state"] {
+            let mut s = Store::default();
+            s.update(input(predicate_arm(mode), stock(json!(20))), 1000)
+                .unwrap();
+            let r = s
+                .update(
+                    input(
+                        json!({"operation":"prepare","observe_only":true}),
+                        stock(json!(20)),
+                    ),
+                    2000,
+                )
+                .unwrap();
+            assert_eq!(r.get("receipts").is_some(), mode == "current_state");
+            assert_eq!(s.watches[0].status, "armed");
+            assert!(s.watches[0].notification.is_none());
+        }
+        for status in ["stopped", "review", "blocked", "budget_exhausted"] {
+            let mut s = Store::default();
+            s.update(
+                input(predicate_arm("current_state"), stock(json!(20))),
+                1000,
+            )
+            .unwrap();
+            let mut i = input(json!({"operation":"prepare"}), stock(json!(20)));
+            i.task.as_mut().unwrap().status = status.into();
+            assert_eq!(
+                s.update(i, 2000).unwrap()["skip"],
+                "no_active_responsibility"
+            );
+            assert_eq!(s.watches[0].status, "cancelled");
+        }
+        for value in [json!(19), json!("20"), Value::Null] {
+            let mut s = Store::default();
+            s.update(
+                input(predicate_arm("current_state"), stock(value.clone())),
+                1000,
+            )
+            .unwrap();
+            assert!(
+                s.update(input(json!({"operation":"prepare"}), stock(value)), 2000)
+                    .unwrap()
+                    .get("receipts")
+                    .is_none()
+            );
+        }
+        let mut s = Store::default();
+        s.update(
+            input(predicate_arm("current_state"), stock(json!(20))),
+            1000,
+        )
+        .unwrap();
+        assert!(
+            s.update(
+                input(json!({"operation":"prepare"}), stock(json!(20))),
+                301001
+            )
+            .unwrap()
+            .get("receipts")
+            .is_none()
+        );
+        assert_eq!(s.watches[0].status, "expired");
+    }
+
     #[test]
     fn sources_dedup_and_one_delivery_survive_reload() {
         let d = tempfile::tempdir().unwrap();

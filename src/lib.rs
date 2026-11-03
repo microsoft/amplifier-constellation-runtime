@@ -4,6 +4,7 @@ pub mod chatgpt;
 pub mod computer;
 pub mod config;
 pub mod context;
+pub mod continuation;
 pub mod copilot;
 pub mod decisions;
 pub mod elicitation;
