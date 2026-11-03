@@ -16,6 +16,10 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Classify continuation from trusted host observations; never executes work.
+    Continuation {
+        file: PathBuf,
+    },
     Init {
         #[arg(long)]
         workspace: PathBuf,
@@ -182,6 +186,15 @@ impl ProviderOptions {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    if let Command::Continuation { file } = &args.command {
+        ensure!(
+            std::fs::metadata(file)?.len() <= 16384,
+            "Continuation input too large"
+        );
+        let input = serde_json::from_slice(&std::fs::read(file)?)?;
+        println!("{}", agent_runtime::continuation::assess(input)?);
+        return Ok(());
+    }
     if let Command::Watch { store, file } = &args.command {
         println!("{}", agent_runtime::watches::from_file(store, file)?);
         return Ok(());
@@ -428,6 +441,7 @@ async fn main() -> Result<()> {
         | Command::Decide { .. }
         | Command::Assess { .. }
         | Command::Watch { .. }
+        | Command::Continuation { .. }
         | Command::Capabilities
         | Command::ConfigureCapabilities { .. } => {
             unreachable!()

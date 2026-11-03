@@ -131,3 +131,5 @@ trademarks or logos is subject to and must follow
 [Microsoft's Trademark & Brand Guidelines](https://www.microsoft.com/legal/intellectualproperty/trademarks/usage/general).
 Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion or imply Microsoft sponsorship.
 Any use of third-party trademarks or logos are subject to those third-party's policies.
+
+See [bounded continuation advice](docs/continuation.md) for receipt-based recovery and remaining-budget checks, and [attention watches](docs/watches.md) for current-state and exact-predicate contracts. Both are optional host helpers; standard ACP agents remain independent.
