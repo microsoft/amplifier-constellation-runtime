@@ -137,6 +137,28 @@ class Tests(unittest.TestCase):
     else:
      self.assertEqual(body['messages'][-1]['content'][0]['image_url']['url'],'data:image/png;base64,'+PNG);self.assertEqual(body['response_format']['json_schema']['schema'],schema)
     c.close();self.clients.remove(c)
+ def test_pdf_native_inputs_and_replay_across_provider_protocols(self):
+  pdf=base64.b64encode(b'%PDF-1.7\nfixture document\n%%EOF').decode()
+  block={'type':'resource','resource':{'uri':'attachment://fixture/brief.pdf','mimeType':'application/pdf','blob':pdf}}
+  for kind in ['openai','azure-openai','anthropic','gemini','chat-completions','litellm']:
+   with self.subTest(kind=kind):
+    self.server.case.update(chat=kind,vision_probe=True,requests=[]);self.cfg['provider'].update(kind=kind,native={'pdf_input':True});c=self.client();s=self.new(c)
+    self.assertIn('result',c.call('session/prompt',{'sessionId':s,'prompt':[block,{'type':'text','text':'Summarize this file'}]}))
+    body=self.server.case['requests'][0][2]
+    if kind in ['openai','azure-openai']:
+     part=body['input'][-1]['content'][0];self.assertEqual(part['type'],'input_file');self.assertEqual(part['filename'],'brief.pdf');self.assertEqual(part['file_data'],'data:application/pdf;base64,'+pdf)
+    elif kind=='anthropic':
+     part=body['messages'][-1]['content'][0];self.assertEqual(part['type'],'document');self.assertEqual(part['source'],{'type':'base64','media_type':'application/pdf','data':pdf})
+    elif kind=='gemini':self.assertEqual(body['contents'][-1]['parts'][0]['inlineData'],{'mimeType':'application/pdf','data':pdf})
+    else:self.assertEqual(body['messages'][-1]['content'][0],{'type':'file','file':{'filename':'brief.pdf','file_data':'data:application/pdf;base64,'+pdf}})
+    c.close();self.clients.remove(c);c=self.client();self.assertIn('result',c.call('session/load',{'sessionId':s,'cwd':str(self.work),'mcpServers':[]}));self.assertTrue(any(u['params'].get('update',{}).get('content')==block for u in c.updates))
+    self.assertIn('result',self.prompt(c,s,'What was in that document?'));self.assertIn(pdf,json.dumps(self.server.case['requests'][-1][2]));c.close();self.clients.remove(c)
+ def test_pdf_configuration_validation_and_no_network_for_disabled_or_bad_files(self):
+  block={'type':'resource','resource':{'uri':'attachment://fixture/brief.pdf','mimeType':'application/pdf','blob':base64.b64encode(b'%PDF-1.7\nfixture').decode()}}
+  c=self.client();s=self.new(c);self.assertIn('error',c.call('session/prompt',{'sessionId':s,'prompt':[block]}));self.assertEqual(self.server.case['requests'],[])
+  self.cfg['provider']['native']={'pdf_input':True};c=self.client();s=self.new(c);block['resource']['blob']=base64.b64encode(b'not a PDF').decode();self.assertIn('error',c.call('session/prompt',{'sessionId':s,'prompt':[block]}));self.assertEqual(self.server.case['requests'],[])
+  for kind in ['mock','ollama','vllm','github-copilot']:
+   self.cfg['provider']['kind']=kind;self.save();self.assertNotEqual(self.cli('check').returncode,0)
  def test_disabled_media_and_unsupported_tools_fail_before_network(self):
   c=self.client();s=self.new(c);r=c.call('session/prompt',{'sessionId':s,'prompt':[{'type':'image','mimeType':'image/png','data':PNG}]});self.assertIn('error',r);self.assertEqual(self.server.case['requests'],[])
   self.cfg['provider']['native']={'tools':[{'type':'computer_use_preview'}]};self.save();self.assertNotEqual(self.cli('check').returncode,0)

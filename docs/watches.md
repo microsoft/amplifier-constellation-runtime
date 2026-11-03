@@ -1,7 +1,7 @@
 # Agent-authored attention watches
 
 An agent defines what it needs to notice while pursuing an existing responsibility.
-The runtime filters selected new evidence with a fast decision model, retaining a
+The runtime filters selected evidence with a fast decision model or exact predicate, retaining a
 notification for the agent to inspect. It never supplies a creative plan, executes
 an experience action, marks work complete, or grants new authority.
 
@@ -63,15 +63,21 @@ access when collecting evidence and rechecks task authority before any wake.
 Dates in the example are illustrative; use the real current task deadline.
 An event has `id`, `kind` (`message`, `tool`, `environment`), `source`, and `content`.
 Source labels distinguish peer reports from direct observations and tool receipts.
-Existing evidence is baselined when arming: a watch concerns new developments.
+`initial_check` chooses whether to baseline existing evidence (`new_events`, the
+backward-compatible default) or inspect it on the first poll (`current_state`).
+Use current state for “when enough material is available” or “when that review
+is complete”: the condition may already be satisfied at registration. This
+avoids losing a result that arrived while the watch was being set up. Both modes
+subsequently evaluate changes and retain the same task and scope boundaries.
 
 Operations:
 
 - `arm`: validate the agent's condition, select evidence kinds, establish baseline.
 - `list`: inspect watches, notifications, expiry, and hourly calls.
 - `cancel`: cancel a watch by `id`.
-- `prepare`: if selected evidence changed, reserve a bounded evaluation and return
+- `prepare`: first evaluate changed exact predicates locally; if selected semantic evidence changed, reserve a bounded evaluation and return
   its `token` and ordinary typed decision `request`; otherwise return a skip reason.
+  `observe_only: true` records predicate matches without delivering notifications.
 - `resolve`: accept normalized `result` for that token after checking the current
   task, lease, and exact source evidence. `observe_only: true` records a shadow
   outcome without delivering a notification.
@@ -87,11 +93,56 @@ any matching alternative produces one notification identifying the matched
 conditions. A legacy `condition` string is accepted for existing integrations;
 do not supply both forms. The MCP tool offers the structured form.
 
+Alternatively, use one exact predicate instead of semantic conditions:
+
+```json
+{
+  "label": "Required stock is present",
+  "initial_check": "current_state",
+  "predicate": {"event_id": "inventory", "path": "/wood", "op": "gte", "value": 12},
+  "kinds": ["environment"],
+  "ttl_seconds": 600
+}
+```
+
+The JSON Pointer addresses the selected event's `content`. `eq` accepts scalar
+strings, numbers and booleans; `gte` and `lte` compare numbers. Missing fields or
+wrong types never match. Only host-observed `environment` facts can satisfy these
+predicates; an agent's message claiming a number cannot substitute for them.
+Exact evaluation makes no provider call and does not consume the semantic
+quota. Its receipts identify `evaluator: predicate`. Hosts must still project
+fresh facts from the authorized source and inspect a notification before acting.
+
 `prepare` and `resolve` intentionally separate the policy/store from provider
 transport. Use the existing `decide` command or `decisions::evaluate`; no additional
 provider SDK or credential mechanism is introduced. The pure Rust module has no
 Minecraft imports. The Minecraft bridge projects public game facts, exposes tools,
 and uses the existing authorized task wake mechanism.
+
+## Switching between observation and delivery
+
+`observe_only` is a host-selected option on each poll, not an immutable property
+of a watch or installation. Shadow evaluation keeps its own persistent evidence
+history: repeated shadow polls do not produce duplicate receipts or model calls,
+and they do not consume the evidence needed for a later live evaluation.
+After switching to `observe_only: false`, unchanged evidence still present in the
+host's input can trigger an armed watch. Exact predicates check it locally;
+semantic watches request a fresh decision, subject to the existing cooldown and
+hourly budget. A shadow result is never automatically promoted into a live wake.
+
+For semantic evaluations, a lease prepared in observe-only mode remains
+observe-only when resolved, even if the host changes mode while the call is in
+flight. A live lease can also be resolved as observe-only. In either case, a
+subsequent live poll may evaluate the same current evidence. Initial
+`new_events` baselines, expiry, task authority, and the single-notification limit
+are unchanged. `recheck` clears current evidence from both histories without
+resetting expiry or the model-call budget.
+
+This separation starts with `responsibility-watch-v6`. Existing stores still
+load, but older versions recorded shadow and live observations in the same
+history, so those earlier observations cannot be distinguished retroactively.
+When promoting an older still-armed watch, use `recheck` with its current evidence
+once after upgrading. This also discards any evaluation lease from the old policy.
 
 ## Lifecycle and limits
 

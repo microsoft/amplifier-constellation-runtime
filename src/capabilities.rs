@@ -10,6 +10,11 @@ pub struct Native {
     pub image_input: bool,
     #[serde(default)]
     pub audio_input: bool,
+    /// Inline ACP PDF resources, converted to the selected provider's file input.
+    #[serde(default)]
+    pub pdf_input: bool,
+    #[serde(default)]
+    pub computer: Option<crate::computer::Computer>,
     /// Provider-hosted tools only. Local execution still uses permissioned tools.
     #[serde(default)]
     pub tools: Vec<Value>,
@@ -31,6 +36,8 @@ impl Native {
     pub fn is_empty(&self) -> bool {
         !self.image_input
             && !self.audio_input
+            && !self.pdf_input
+            && self.computer.is_none()
             && self.tools.is_empty()
             && !self.disable_function_tools
             && self.response_modalities.is_empty()
@@ -45,6 +52,13 @@ impl Native {
             "Native capability configuration too large"
         );
         ensure!(self.tools.len() <= 8, "Too many native tools");
+        if let Some(computer) = &self.computer {
+            ensure!(
+                matches!(k, ProviderKind::Openai | ProviderKind::AzureOpenai),
+                "Native computer calls currently require the OpenAI/Azure Responses protocol"
+            );
+            computer.validate()?;
+        }
         ensure!(
             !self.image_input || k != ProviderKind::Mock,
             "Mock has no vision model"
@@ -52,6 +66,19 @@ impl Native {
         ensure!(
             !self.audio_input || k == ProviderKind::Gemini,
             "Audio input currently requires Gemini"
+        );
+        ensure!(
+            !self.pdf_input
+                || matches!(
+                    k,
+                    ProviderKind::Openai
+                        | ProviderKind::AzureOpenai
+                        | ProviderKind::Anthropic
+                        | ProviderKind::Gemini
+                        | ProviderKind::ChatCompletions
+                        | ProviderKind::Litellm
+                ),
+            "PDF input requires a supported document-capable provider protocol"
         );
         ensure!(
             self.response_modalities.is_empty() || k == ProviderKind::Gemini,
@@ -157,5 +184,5 @@ impl Native {
     }
 }
 pub fn report(c: &Config) -> Value {
-    json!({"provider":c.provider.kind,"model":c.provider.model,"configured":c.provider.native,"decisions":c.decisions.iter().map(|b|json!({"name":b.name,"provider":b.provider,"model":b.model,"expose_to_agent":b.expose_to_agent,"credential_present":std::env::var(&b.api_key_env).is_ok_and(|s|!s.trim().is_empty())})).collect::<Vec<_>>(),"account_and_model_support_verified":false,"supported":{"openai_azure":["image input","image generation","web search","file search","code interpreter","structured output"],"anthropic":["image input","web search","web fetch","code execution","structured output","pause/resume server loops"],"gemini":["image/audio input","image/audio output","Google search","URL context","code execution","Maps grounding","file search","structured output"],"compatible":["image input (model dependent)","structured output (server dependent)"]},"not_implemented":["hosted remote MCP approval bridging","native computer/browser control","realtime duplex audio/video","video generation jobs","embedding/index management","automatic model capability discovery"],"notes":"Capabilities are opt-in. Provider/model combinations and account entitlements must be checked on the actual endpoint; unsupported requests fail without a silent downgrade."})
+    json!({"provider":c.provider.kind,"model":c.provider.model,"configured":c.provider.native,"decisions":c.decisions.iter().map(|b|json!({"name":b.name,"provider":b.provider,"model":b.model,"expose_to_agent":b.expose_to_agent,"credential_present":std::env::var(&b.api_key_env).is_ok_and(|s|!s.trim().is_empty())})).collect::<Vec<_>>(),"account_and_model_support_verified":false,"supported":{"openai_azure":["image/PDF input","native computer calls through an explicit MCP environment","image generation","web search","file search","code interpreter","structured output"],"anthropic":["image/PDF input","web search","web fetch","code execution","structured output","pause/resume server loops"],"gemini":["image/audio/PDF input","image/audio output","Google search","URL context","code execution","Maps grounding","file search","structured output"],"compatible":["image input (model dependent)","structured output (server dependent)"]},"not_implemented":["hosted remote MCP approval bridging","realtime duplex audio/video","video generation jobs","embedding/index management","automatic model capability discovery"],"notes":"Capabilities are opt-in. Provider/model combinations and account entitlements must be checked on the actual endpoint; unsupported requests fail without a silent downgrade."})
 }

@@ -83,6 +83,33 @@ pub fn prompt(c: &Config, parts: &[Value]) -> Result<Value> {
                     let mime = resource["mimeType"]
                         .as_str()
                         .unwrap_or("application/octet-stream");
+                    if mime == "application/pdf" {
+                        ensure!(
+                            c.provider.native.pdf_input,
+                            "PDF input is not enabled for this installation"
+                        );
+                        ensure!(
+                            bytes.starts_with(b"%PDF-"),
+                            "PDF resource has no PDF header"
+                        );
+                        let filename = reqwest::Url::parse(uri)?
+                            .path_segments()
+                            .and_then(|mut s| s.next_back())
+                            .unwrap_or("document.pdf")
+                            .chars()
+                            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+                            .take(120)
+                            .collect::<String>();
+                        let filename = if filename.ends_with(".pdf") {
+                            filename
+                        } else {
+                            "document.pdf".into()
+                        };
+                        content.push(json!({"type":"input_file","filename":filename,
+                            "file_data":format!("data:application/pdf;base64,{blob}")}));
+                        media += 1;
+                        continue;
+                    }
                     if mime.starts_with("text/")
                         || matches!(mime, "application/json" | "application/xml")
                     {
@@ -124,7 +151,7 @@ pub fn prompt(c: &Config, parts: &[Value]) -> Result<Value> {
     }
     ensure!(
         text_bytes <= 256 * 1024 && media <= 4,
-        "Prompt exceeds text or image count budget"
+        "Prompt exceeds text or media count budget"
     );
     if media == 0 {
         let s = content
@@ -155,6 +182,12 @@ pub fn image(part: &Value) -> Result<(&str, &str)> {
     validate_data(data, mime, false)?;
     Ok((mime, data))
 }
+pub fn pdf(part: &Value) -> Result<&str> {
+    part["file_data"]
+        .as_str()
+        .and_then(|s| s.strip_prefix("data:application/pdf;base64,"))
+        .context("Expected an inline PDF file")
+}
 // The model context budget counts media separately from base64 storage. A
 // separate hard history cap bounds storage and request sizes as well.
 pub fn context_bytes(items: &[Value]) -> Result<usize> {
@@ -163,6 +196,8 @@ pub fn context_bytes(items: &[Value]) -> Result<usize> {
             Value::Object(o) => {
                 if o.get("type") == Some(&json!("input_image"))
                     || o.get("type") == Some(&json!("input_audio"))
+                    || o.get("type") == Some(&json!("input_file"))
+                    || o.get("type") == Some(&json!("computer_screenshot"))
                     || o.contains_key("inlineData")
                     || matches!(
                         o.get("type").and_then(Value::as_str),
@@ -251,6 +286,23 @@ fn hosted(out: &mut Vec<Value>, id: &str, name: &str, status: &str, content: &Va
 }
 pub fn updates(item: &Value, replay_text: bool) -> Result<Vec<Value>> {
     let mut out = vec![];
+    // Live computer events are emitted at the approval/execution boundary. On
+    // load, project the persisted records without touching the environment.
+    if replay_text && item["type"] == "computer_call" {
+        out.push(json!({"sessionUpdate":"tool_call","toolCallId":item["call_id"],"title":"Control the configured computer environment","kind":"execute","status":if item["_computer_interrupted"] == true {"failed"} else {"pending"},"rawInput":{"actions":item["actions"],"pending_safety_checks":item["pending_safety_checks"]}}));
+        return Ok(out);
+    }
+    if replay_text && item["type"] == "computer_call_output" {
+        let url = item["output"]["image_url"]
+            .as_str()
+            .context("Computer screenshot missing")?;
+        let data = url
+            .strip_prefix("data:image/png;base64,")
+            .context("Invalid computer screenshot")?;
+        validate_data(data, "image/png", false)?;
+        out.push(json!({"sessionUpdate":"tool_call_update","toolCallId":item["call_id"],"status":"completed","content":[{"type":"content","content":{"type":"image","mimeType":"image/png","data":data}}]}));
+        return Ok(out);
+    }
     if item["type"] != "function_call_output"
         && let Some(blocks) = item["_acp_content"].as_array()
     {
