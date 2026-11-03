@@ -93,6 +93,49 @@ any matching alternative produces one notification identifying the matched
 conditions. A legacy `condition` string is accepted for existing integrations;
 do not supply both forms. The MCP tool offers the structured form.
 
+### Message filters before semantic evaluation
+
+With `responsibility-watch-v7`, a host can attach factual transport metadata to a
+message event: `"message": {"author": "Lena", "recipients": ["Bea"],
+"intent": "request"}`. Use authenticated speaker identity and explicit routing or
+message-type fields from the experience. A name mentioned in prose is not an
+addressee. Metadata narrows evidence; it does not authenticate the prose, prove
+completion, or authorize an action.
+
+An `any_of` entry may remain a string or use an exact filter:
+
+```json
+[
+  {
+    "condition": "Lena asks Bea for help on the current project",
+    "message": {"authors": ["Lena"], "recipients": ["Bea"], "intents": ["request"]}
+  },
+  {
+    "condition": "Lena reports the completed review, including no changes needed",
+    "message": {"authors": ["Lena"], "intents": ["update"]}
+  }
+]
+```
+
+Values match exactly, with OR within a list and AND between specified fields.
+At least one nonempty field is required. Missing message metadata cannot satisfy
+a filtered branch. String branches retain their previous behavior. Do not require
+direct addressing for a completion report that the agent should notice in a
+shared conversation; the second example deliberately allows public updates.
+
+Filtering runs before the provider request. If no branch has eligible new
+evidence, no decision call or quota is consumed. `filtered_events` counts selected
+events rejected by every branch of each watch; it is not a count of saved planner
+calls. Eligible evidence still needs semantic evaluation and the usual authority
+checks. Filters use separate shadow/live cursors, like other evidence.
+
+Existing definitions, leases, cursors, expirations, and budgets load unchanged.
+Adding metadata does not make an already-seen event new. Hosts must keep metadata
+stable for an event and explicitly use `recheck` if correcting it. An in-flight
+result is discarded if its metadata changed; no old result gains new authority.
+Upgrade the helper before a host starts sending the optional metadata. Existing
+string watches are not automatically rewritten into filters.
+
 Alternatively, use one exact predicate instead of semantic conditions:
 
 ```json
