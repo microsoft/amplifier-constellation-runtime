@@ -1,6 +1,7 @@
 pub mod assessment;
 pub mod capabilities;
 pub mod chatgpt;
+pub mod computer;
 pub mod config;
 pub mod context;
 pub mod copilot;

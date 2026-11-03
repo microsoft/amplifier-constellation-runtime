@@ -87,6 +87,8 @@ pub fn messages(kind: ProviderKind, items: &[Value]) -> Result<Vec<Value>> {
                 if kind == ProviderKind::Anthropic {
                     let part = if let Some(text) = text {
                         json!({"type":"text","text":text})
+                    } else if p["type"] == "input_file" {
+                        json!({"type":"document","source":{"type":"base64","media_type":"application/pdf","data":crate::media::pdf(&p)?}})
                     } else {
                         let (mime, data) = crate::media::image(&p)?;
                         json!({"type":"image","source":{"type":"base64","media_type":mime,"data":data}})
@@ -97,6 +99,8 @@ pub fn messages(kind: ProviderKind, items: &[Value]) -> Result<Vec<Value>> {
                         json!({"text":text})
                     } else if p["type"] == "input_audio" {
                         json!({"inlineData":{"mimeType":p["mime_type"],"data":p["data"]}})
+                    } else if p["type"] == "input_file" {
+                        json!({"inlineData":{"mimeType":"application/pdf","data":crate::media::pdf(&p)?}})
                     } else {
                         let (mime, data) = crate::media::image(&p)?;
                         json!({"inlineData":{"mimeType":mime,"data":data}})
@@ -104,6 +108,12 @@ pub fn messages(kind: ProviderKind, items: &[Value]) -> Result<Vec<Value>> {
                     push(&mut result, "user", "parts", part);
                 } else if let Some(text) = text {
                     chat.push(json!({"type":"text","text":text}));
+                } else if p["type"] == "input_file" {
+                    ensure!(
+                        kind != ProviderKind::Ollama,
+                        "This protocol does not support PDF inputs"
+                    );
+                    chat.push(json!({"type":"file","file":{"filename":p["filename"],"file_data":p["file_data"]}}));
                 } else {
                     let (_, data) = crate::media::image(&p)?;
                     ollama_images.push(data.to_owned());
@@ -123,7 +133,7 @@ pub fn messages(kind: ProviderKind, items: &[Value]) -> Result<Vec<Value>> {
                     }
                     result.push(m);
                 } else {
-                    result.push(json!({"role":"user","content":if ollama_images.is_empty(){json!(text)}else{json!(chat)}}));
+                    result.push(json!({"role":"user","content":if chat.iter().all(|p|p["type"]=="text"){json!(text)}else{json!(chat)}}));
                 }
             }
         } else if item["type"] == "function_call_output" {
@@ -172,7 +182,7 @@ pub fn usage(input: &Value, output: &Value, native: &Value) -> Value {
 /// bytes and submit them as explicitly labeled evidence on subsequent turns.
 /// The stored transcript still contains the original tool result for replay.
 pub fn responses(items: &[Value]) -> Vec<Value> {
-    items.iter().map(|item|{
+    items.iter().filter(|item|item["_computer_interrupted"]!=true).map(|item|{
         if item["type"]=="image_generation_call" {
             if let Some(data)=item["result"].as_str(){
                 use sha2::{Digest,Sha256};

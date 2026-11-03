@@ -43,6 +43,7 @@ jobs:
       - run: python tests/protocol.py
       - run: python tests/providers.py
       - run: python tests/capabilities.py
+      - run: python tests/computer.py
       - run: python tests/management.py
       - run: python tests/copilot_protocol.py
       - run: python -m pip install -r bridges/copilot/requirements.txt

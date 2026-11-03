@@ -109,7 +109,30 @@ impl Turn<'_> {
         {
             definitions.push(tools::definition("provider_file","Download an artifact returned by a hosted tool in this session. Use only the file_id (and container_id for OpenAI container files) present in a provider result. Returns the file to the ACP client. Generated-file citations in a final answer are also downloaded automatically by the runtime, even if their identifiers arrive after your answer; cite the generated artifact rather than inventing IDs.",json!({"file_id":{"type":"string"},"container_id":{"type":"string"}}),vec!["file_id"]));
         }
-        definitions.extend(self.mcp.tools.values().map(|t| t.definition.clone()));
+        let computer_binding = self
+            .config
+            .provider
+            .native
+            .computer
+            .as_ref()
+            .map(|c| {
+                self.mcp
+                    .tools
+                    .iter()
+                    .find(|(_, t)| t.server == c.mcp_server && t.name == c.mcp_tool)
+                    .map(|(alias, _)| alias.clone())
+                    .context("Configured computer MCP environment is not connected")
+            })
+            .transpose()?;
+        // The environment is offered only through the native computer boundary,
+        // never a second function alias that could bypass per-action approval.
+        definitions.extend(
+            self.mcp
+                .tools
+                .iter()
+                .filter(|(alias, _)| Some(*alias) != computer_binding.as_ref())
+                .map(|(_, t)| t.definition.clone()),
+        );
         if self.config.provider.native.disable_function_tools {
             definitions.clear();
         }
@@ -196,7 +219,7 @@ impl Turn<'_> {
             }
             let calls: Vec<_> = output
                 .iter()
-                .filter(|v| v["type"] == "function_call")
+                .filter(|v| v["type"] == "function_call" || v["type"] == "computer_call")
                 .cloned()
                 .collect();
             if calls.is_empty() {
@@ -266,6 +289,92 @@ impl Turn<'_> {
                     used_calls.insert(call_id.to_owned()),
                     "Provider repeated a tool call ID; execution stopped"
                 );
+                if call["type"] == "computer_call" {
+                    let computer = self
+                        .config
+                        .provider
+                        .native
+                        .computer
+                        .as_ref()
+                        .context("Unadvertised computer call")?;
+                    let alias = computer_binding
+                        .as_ref()
+                        .context("Computer environment is unavailable")?;
+                    let args = computer.arguments(&call)?;
+                    let input = json!({"environment":computer.mcp_server,"tool":computer.mcp_tool,"actions":args["actions"],"pending_safety_checks":call["pending_safety_checks"]});
+                    self.peer.update(&self.session.id,json!({"sessionUpdate":"tool_call","toolCallId":call_id,"title":"Control the configured computer environment","kind":"execute","status":"pending","rawInput":input})).await?;
+                    self.store.event(
+                        &self.session.id,
+                        Some(turn),
+                        "computer.intent",
+                        json!({"call_id":call_id}),
+                    )?;
+                    let allowed = self.session.mode != Mode::ReadOnly
+                        && self
+                            .peer
+                            .permission(
+                                &self.session.id,
+                                call_id,
+                                "Control the configured computer environment",
+                                &input,
+                                &self.cancel,
+                            )
+                            .await
+                            .unwrap_or(false);
+                    let result = if allowed {
+                        self.mcp
+                            .call(alias, args)
+                            .await
+                            .and_then(|r| computer.screenshot(&r))
+                    } else {
+                        Err(anyhow::anyhow!(
+                            "Computer action declined or unavailable; no action performed"
+                        ))
+                    };
+                    match result {
+                        Ok(data) => {
+                            let mut result = json!({"type":"computer_call_output","call_id":call_id,"output":{"type":"computer_screenshot","image_url":format!("data:image/png;base64,{data}"),"detail":"original"}});
+                            if let Some(checks) = call
+                                .get("pending_safety_checks")
+                                .filter(|v| v.as_array().is_some_and(|a| !a.is_empty()))
+                            {
+                                result["acknowledged_safety_checks"] = checks.clone();
+                            }
+                            self.session.items.push(result);
+                            self.store.save(&self.session)?;
+                            self.store.event(
+                                &self.session.id,
+                                Some(turn),
+                                "computer.completed",
+                                json!({"call_id":call_id}),
+                            )?;
+                            self.peer.update(&self.session.id,json!({"sessionUpdate":"tool_call_update","toolCallId":call_id,"status":"completed","content":[{"type":"content","content":{"type":"image","mimeType":"image/png","data":data}}]})).await?;
+                        }
+                        Err(_) => {
+                            // No automatic retry: the external environment may have
+                            // performed part of a failed batch. Preserve that uncertainty.
+                            let note = if allowed {
+                                "The computer action did not return a verified screenshot. Its outcome is uncertain; inspect the environment before retrying."
+                            } else {
+                                "The computer action was declined or unavailable. No action was performed."
+                            };
+                            if let Some(item) =
+                                self.session.items.iter_mut().rev().find(|i| {
+                                    i["type"] == "computer_call" && i["call_id"] == call_id
+                                })
+                            {
+                                item["_computer_interrupted"] = json!(true);
+                            }
+                            self.session.items.push(json!({"role":"assistant","content":[{"type":"output_text","text":note}]}));
+                            self.store.save(&self.session)?;
+                            self.store.event(&self.session.id,Some(turn),"computer.stopped",json!({"call_id":call_id,"authorized":allowed,"outcome_uncertain":allowed}))?;
+                            self.peer.update(&self.session.id,json!({"sessionUpdate":"tool_call_update","toolCallId":call_id,"status":"failed"})).await?;
+                            self.peer.update(&self.session.id,json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":note}})).await?;
+                            return Ok("end_turn");
+                        }
+                    }
+                    continue;
+                }
                 let name = call["name"].as_str().context("Tool name missing")?;
                 let arguments = call["arguments"]
                     .as_str()
@@ -478,6 +587,28 @@ impl Turn<'_> {
     }
 }
 pub fn recover_pending_tools(items: &mut Vec<Value>) {
+    let computer_answered: HashSet<String> = items
+        .iter()
+        .filter(|v| v["type"] == "computer_call_output")
+        .filter_map(|v| v["call_id"].as_str().map(str::to_owned))
+        .collect();
+    let mut interrupted = false;
+    for item in items
+        .iter_mut()
+        .filter(|v| v["type"] == "computer_call" && v["_computer_interrupted"] != true)
+    {
+        if item["call_id"]
+            .as_str()
+            .is_some_and(|id| !computer_answered.contains(id))
+        {
+            item["_computer_interrupted"] = json!(true);
+            interrupted = true;
+        }
+    }
+    if interrupted {
+        items.push(json!({"role":"assistant","content":[{"type":"output_text","text":"A previous computer action was interrupted before a verified result was saved. Its outcome is unknown. It was not automatically replayed; inspect the environment before proposing another action."}]}));
+    }
+
     let answered: HashSet<String> = items
         .iter()
         .filter(|v| v["type"] == "function_call_output")

@@ -211,6 +211,15 @@ impl Provider {
                 .unwrap()
                 .extend(p.native.tools.clone());
         }
+        if p.native.computer.is_some() {
+            if !body["tools"].is_array() {
+                body["tools"] = json!([]);
+            }
+            body["tools"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"type":"computer"}));
+        }
         if p.kind == ProviderKind::Anthropic
             && let Some(container) = items
                 .iter()

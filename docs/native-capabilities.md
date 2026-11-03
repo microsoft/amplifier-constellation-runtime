@@ -44,6 +44,60 @@ Provider-hosted tools execute in the provider's environment and may incur separa
 
 Real integration checks completed OpenAI image generation, image editing after reconnect, a permissioned exact-byte image save, web search, and hosted code execution with automatic file download and exact-byte verification; Gemini image generation and replay; and Anthropic web search plus hosted code execution, citations, and replay. The remaining tool combinations use protocol fixtures or require a configured provider resource. Fixtures cover all eight HTTP protocols' vision/schema request formats, Azure media transport, file-reference isolation, private continuation fields, and rejection/cancellation paths. The browser clients separately verify image rendering and persistence with real ACP fixture processes.
 
-Not implemented: native computer/browser control, hosted remote-MCP approval bridging, realtime duplex audio/video, video-generation jobs, embeddings/index administration, PDF/file prompt ingestion, automatic model capability discovery, or provider cache management. These have distinct execution or data lifecycles and are not advertised as supported through a generic JSON pass-through.
+Not implemented: native computer control for non-Responses protocols, hosted remote-MCP approval bridging, realtime duplex audio/video, video-generation jobs, embeddings/index administration, non-PDF binary prompt ingestion, automatic model capability discovery, or provider cache management. These have distinct execution or data lifecycles and are not advertised as supported through a generic JSON pass-through.
 
 References: [OpenAI tools](https://developers.openai.com/api/docs/guides/tools), [OpenAI image generation](https://developers.openai.com/api/docs/guides/tools-image-generation), [Anthropic server tools](https://platform.claude.com/docs/en/agents-and-tools/tool-use/server-tools), [Anthropic code execution](https://platform.claude.com/docs/en/agents-and-tools/tool-use/code-execution-tool), [Gemini image generation](https://ai.google.dev/gemini-api/docs/generate-content/image-generation), and [Gemini generateContent](https://ai.google.dev/api/generate-content).
+
+## PDF input
+
+Enable `provider.native.pdf_input` for a model that accepts PDFs. A client sends
+a standard ACP `resource` block with an absolute descriptive URI,
+`mimeType: "application/pdf"` and base64 `blob`. The URI is not fetched and never
+becomes a host filesystem path. Original bytes are kept for session replay.
+
+The runtime converts the file to Responses `input_file` for OpenAI/Azure,
+Anthropic `document`, Gemini `inlineData`, or Chat Completions/LiteLLM `file`.
+Unsupported protocols, disabled input, malformed base64 and missing PDF headers
+fail before a provider call. Limits remain four media parts, 16 MiB base64 per
+part and 20 MiB per complete prompt. Provider page/context limits still apply;
+this is a bounded transport, not a PDF sanitizer or a guarantee of model fidelity.
+
+See the provider contracts: [OpenAI file inputs](https://developers.openai.com/api/docs/guides/file-inputs),
+[Anthropic PDF support](https://platform.claude.com/docs/en/build-with-claude/pdf-support),
+and [Gemini document processing](https://ai.google.dev/gemini-api/docs/document-processing).
+
+
+## Native computer/browser control
+
+Responses models can use the native `computer` tool when `provider.native.computer`
+binds it to a session's explicitly connected MCP server and tool. The
+[isolated browser example](../examples/computer/README.md) provides the environment;
+the Rust runtime owns action validation, approval, budgets, persistence and the
+model loop. It does not control the host desktop or reuse a person's browser.
+
+Every batch, including screenshots, requires a single-use ACP permission. The
+permission shows the actions and any provider safety checks. Workspace mode and
+MCP read-only hints do not skip it; read-only sessions deny computer calls.
+Safety checks are acknowledged to the provider only after approval. The MCP tool
+is withheld from ordinary function tools, so the model cannot bypass this path.
+A screenshot must be one bounded PNG matching the configured display dimensions.
+
+A failed or interrupted batch has an uncertain outcome and stops the turn. The
+runtime preserves the original record, reports the uncertainty, and never
+replays it on reconnect. Historical incomplete calls are removed only from the
+provider continuation payload, with an explicit interruption note. Original
+private history remains intact. Do not treat successful delivery of a batch as
+proof of task completion; inspect the screenshot/application result.
+
+This implementation uses the current Responses `computer_call.actions` and
+`computer_call_output` contract. OpenAI was checked live against an isolated
+local web page: screenshot, approved click, and returned verification code.
+Azure uses the same wire format but still needs a compatible deployment. Other
+providers' native computer formats are not advertised by this setting.
+
+The live PDF checks separately read a fresh code from an actual PDF and recalled
+it after a process restart on OpenAI, Anthropic, and Gemini. The six protocol
+fixtures cover wire conversion and original ACP resource replay; those checks do
+not establish document interpretation quality for every model or file.
+
+Reference: [OpenAI computer use](https://developers.openai.com/api/docs/guides/tools-computer-use).
