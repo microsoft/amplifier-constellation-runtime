@@ -34,6 +34,11 @@ Before a tool effect, the function call is persisted. The actual returned result
 
 File operations use a directory capability rooted in the workspace. Parent traversal, symlink escape, writes through hard links, non-regular file access, and oversized reads/writes are rejected. Linux commands run in bubblewrap with a bounded workspace and system binaries, separate process group, no network, and a clean environment. Command cancellation terminates the group. There is no unrestricted fallback.
 
+Linux command environments include read-only synthetic `passwd` and `group`
+entries for the current mapped identity, named `agent`. This supports ordinary
+user lookups in build and test tools without exposing host accounts, home paths,
+password databases, or credentials. It does not grant network or host access.
+
 MCP stdio startup is disabled by default because it grants host-command authority to the connected client. An owner may enable it explicitly for fully trusted local clients. Those children receive a reduced environment and explicit per-server environment entries, not the model key. HTTP credentials are attached only to the specified server; redirects are disabled. The runtime does not implement sampling or arbitrary client callbacks. Remote side effects cannot be rolled back by closing the connection.
 
 ## Credentials and storage
