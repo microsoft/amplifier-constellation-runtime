@@ -289,6 +289,23 @@ async fn capture<R: tokio::io::AsyncRead + Unpin>(
     Ok((String::from_utf8_lossy(&output).into_owned(), truncated))
 }
 #[cfg(not(windows))]
+#[cfg(not(target_os = "macos"))]
+fn isolated_account() -> Result<tempfile::TempDir> {
+    let account = tempfile::Builder::new()
+        .prefix("agent-command-account-")
+        .tempdir()?;
+    // Supply only the mapped command identity, never the host account database.
+    // These lookups let ordinary build/test tools resolve their current user.
+    let uid = unsafe { libc::geteuid() };
+    let gid = unsafe { libc::getegid() };
+    std::fs::write(
+        account.path().join("passwd"),
+        format!("agent:x:{uid}:{gid}:Isolated agent:/tmp:/bin/sh\n"),
+    )?;
+    std::fs::write(account.path().join("group"), format!("agent:x:{gid}:\n"))?;
+    Ok(account)
+}
+#[cfg(not(windows))]
 async fn run(c: &Config, cwd: &Path, args: &Value) -> Result<Value> {
     ensure!(
         command_isolation().is_some(),
@@ -327,6 +344,8 @@ async fn run(c: &Config, cwd: &Path, args: &Value) -> Result<Value> {
             .current_dir(&cwd);
         cmd
     };
+    #[cfg(not(target_os = "macos"))]
+    let account = isolated_account()?;
     #[cfg(not(target_os = "macos"))]
     let mut cmd = tokio::process::Command::new("/usr/bin/bwrap");
     #[cfg(not(target_os = "macos"))]
@@ -368,6 +387,11 @@ async fn run(c: &Config, cwd: &Path, args: &Value) -> Result<Value> {
             "LANG",
             "C.UTF-8",
         ]);
+        for name in ["passwd", "group"] {
+            cmd.arg("--ro-bind")
+                .arg(account.path().join(name))
+                .arg(format!("/etc/{name}"));
+        }
         for root in &roots {
             cmd.arg("--bind").arg(root).arg(root);
         }

@@ -148,6 +148,34 @@ async fn isolated_commands_keep_file_network_and_environment_boundaries() {
 }
 
 #[tokio::test]
+#[cfg(target_os = "linux")]
+async fn isolated_account_supports_development_tools_without_host_identity() {
+    if tools::command_isolation().is_none() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let c = Config::initial(
+        dir.path().to_owned(),
+        "Account test".into(),
+        "fixture".into(),
+    );
+    let result = tools::call(
+        &c,
+        dir.path(),
+        "workspace_run",
+        &json!({"command":"/bin/sh","args":["-c","id -un; id -gn; cat /etc/passwd; cat /etc/group; test ! -e /etc/shadow; test ! -e /etc/ssh; ! printf injected >> /etc/passwd"]}),
+    ).await.unwrap();
+    assert_eq!(result["exit_code"], 0, "{result}");
+    let uid = unsafe { libc::geteuid() };
+    let gid = unsafe { libc::getegid() };
+    assert_eq!(
+        result["stdout"],
+        format!("agent\nagent\nagent:x:{uid}:{gid}:Isolated agent:/tmp:/bin/sh\nagent:x:{gid}:\n"),
+        "{result}",
+    );
+}
+
+#[tokio::test]
 async fn cancellation_kills_descendants() {
     if tools::command_isolation().is_none() {
         return;
