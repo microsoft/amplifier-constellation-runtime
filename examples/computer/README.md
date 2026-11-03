@@ -35,7 +35,8 @@ sessions cannot control the environment; workspace mode does not bypass approval
 A client without interactive permission support cannot use it unattended.
 
 Only the starting origin is reachable. Repeat `--allow-origin https://...` for
-additional origins you intend to expose. Redirects and subresources are checked;
+additional origins you intend to expose. Subresources are checked. All HTTP redirects and WebSockets are refused;
+use the final page URL directly.
 service workers, downloads, dialogs, popups and durable profiles are disabled.
 An origin allowlist is a useful restriction, not a substitute for network
 isolation. Deploy the driver in an isolated container/VM when browsing untrusted

@@ -301,7 +301,18 @@ async fn handle(state: Arc<State>, msg: &Value) -> Result<Value> {
                         }
                         state.peer.update(sid,json!({"sessionUpdate":"tool_call_update","toolCallId":item["call_id"],"status":if failed{"failed"}else{"completed"},"content":blocks})).await?;
                     }
-                    for update in crate::media::updates(item, true)? {
+                    let mut replay = item.clone();
+                    if replay["type"] == "computer_call"
+                        && !session.items.iter().any(|result| {
+                            result["type"] == "computer_call_output"
+                                && result["call_id"] == replay["call_id"]
+                        })
+                    {
+                        // A crash can leave a durable intent without its result.
+                        // Display that uncertainty; never replay its side effects.
+                        replay["_computer_interrupted"] = json!(true);
+                    }
+                    for update in crate::media::updates(&replay, true)? {
                         state.peer.update(sid, update).await?;
                     }
                 }

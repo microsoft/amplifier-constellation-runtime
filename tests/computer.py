@@ -46,10 +46,17 @@ class Tests(unittest.TestCase):
  def test_workspace_mode_requires_explicit_computer_approval_and_safety_ack(self):
   c,sid=self.client();r=self.prompt(c,sid,approve=True);self.assertIn('result',r);self.assertEqual(self.server.effects,1);self.assertEqual(len(c.callbacks),1);self.assertIn('pending_safety_checks',str(c.callbacks))
   result=next(v for v in self.server.inputs[-1] if v.get('type')=='computer_call_output');self.assertEqual(result['acknowledged_safety_checks'][0]['id'],'check-1');self.assertEqual(result['output']['type'],'computer_screenshot')
-  c.close();self.clients.remove(c);c,_=self.client(sid);self.prompt(c,sid,'after restart');self.assertEqual(self.server.effects,1)
+  c.close();self.clients.remove(c);c,_=self.client(sid)
+  replay=[u['params']['update'] for u in c.updates if u.get('method')=='session/update']
+  self.assertEqual(len([u for u in replay if u['sessionUpdate']=='tool_call']),1)
+  results=[u for u in replay if u['sessionUpdate']=='tool_call_update'];self.assertEqual(len(results),1);self.assertEqual(results[0]['status'],'completed');self.assertEqual(results[0]['content'][0]['content']['data'],png());self.assertEqual(c.callbacks,[]);self.assertEqual(self.server.effects,1)
+  self.prompt(c,sid,'after restart');self.assertEqual(self.server.effects,1)
  def test_denial_and_failed_screenshot_are_not_replayed(self):
   for authorized in [False,True]:
-   self.server.fail=authorized;c,sid=self.client();before=self.server.effects;r=self.prompt(c,sid,approve=authorized);self.assertIn('result',r);self.assertEqual(self.server.effects-before,int(authorized));self.prompt(c,sid,'after stop',approve=True);self.assertEqual(self.server.effects-before,int(authorized));self.assertFalse(any(v.get('type')=='computer_call' for v in self.server.inputs[-1]))
+   self.server.fail=authorized;c,sid=self.client();before=self.server.effects;r=self.prompt(c,sid,approve=authorized);self.assertIn('result',r);self.assertEqual(self.server.effects-before,int(authorized))
+   c.close();self.clients.remove(c);c,_=self.client(sid)
+   replay=[u['params']['update'] for u in c.updates if u.get('method')=='session/update'];cards=[u for u in replay if u['sessionUpdate']=='tool_call'];self.assertEqual(len(cards),1);self.assertEqual(cards[0]['status'],'failed');self.assertEqual(c.callbacks,[]);self.assertEqual(self.server.effects-before,int(authorized))
+   self.prompt(c,sid,'after stop',approve=True);self.assertEqual(self.server.effects-before,int(authorized));self.assertFalse(any(v.get('type')=='computer_call' for v in self.server.inputs[-1]))
  def test_bad_coordinate_never_reaches_environment(self):
   self.server.invalid=True;c,sid=self.client();self.assertIn('error',self.prompt(c,sid,approve=True));self.assertEqual(self.server.effects,0);self.assertEqual(c.callbacks,[]);self.prompt(c,sid,'after invalid call');self.assertEqual(self.server.effects,0)
  def test_read_only_mode_never_calls_computer_even_with_auto_approval_client(self):

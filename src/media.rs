@@ -286,6 +286,23 @@ fn hosted(out: &mut Vec<Value>, id: &str, name: &str, status: &str, content: &Va
 }
 pub fn updates(item: &Value, replay_text: bool) -> Result<Vec<Value>> {
     let mut out = vec![];
+    // Live computer events are emitted at the approval/execution boundary. On
+    // load, project the persisted records without touching the environment.
+    if replay_text && item["type"] == "computer_call" {
+        out.push(json!({"sessionUpdate":"tool_call","toolCallId":item["call_id"],"title":"Control the configured computer environment","kind":"execute","status":if item["_computer_interrupted"] == true {"failed"} else {"pending"},"rawInput":{"actions":item["actions"],"pending_safety_checks":item["pending_safety_checks"]}}));
+        return Ok(out);
+    }
+    if replay_text && item["type"] == "computer_call_output" {
+        let url = item["output"]["image_url"]
+            .as_str()
+            .context("Computer screenshot missing")?;
+        let data = url
+            .strip_prefix("data:image/png;base64,")
+            .context("Invalid computer screenshot")?;
+        validate_data(data, "image/png", false)?;
+        out.push(json!({"sessionUpdate":"tool_call_update","toolCallId":item["call_id"],"status":"completed","content":[{"type":"content","content":{"type":"image","mimeType":"image/png","data":data}}]}));
+        return Ok(out);
+    }
     if item["type"] != "function_call_output"
         && let Some(blocks) = item["_acp_content"].as_array()
     {

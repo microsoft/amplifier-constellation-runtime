@@ -11,7 +11,21 @@ const width=Number(option('--width')||1280),height=Number(option('--height')||72
 if(!Number.isInteger(width)||!Number.isInteger(height)||width<64||width>4096||height<64||height>4096)throw Error('Invalid viewport');
 const browser=await chromium.launch({headless:true});
 const context=await browser.newContext({viewport:{width,height},acceptDownloads:false,serviceWorkers:'block',permissions:[]});
-await context.route('**/*',route=>{try{return origins.has(new URL(route.request().url()).origin)?route.continue():route.abort();}catch{return route.abort();}});
+// Playwright does not intercept every redirect hop. Fetch exactly one hop and
+// refuse redirects before Chromium can contact their destination.
+await context.route('**/*',async route=>{
+ let response;
+ try{
+  if(!origins.has(new URL(route.request().url()).origin))return await route.abort();
+  response=await route.fetch({maxRedirects:0,timeout:20000});
+  if(response.status()>=300&&response.status()<400)return await route.abort();
+  await route.fulfill({response});
+ }catch{await route.abort().catch(()=>{});}
+ finally{await response?.dispose();}
+});
+// WebSocket handshakes bypass HTTP routing. This bounded example does not need
+// sockets: never connect a routed socket to its server (even on allowed origins).
+await context.routeWebSocket('**/*',socket=>socket.close());
 const page=await context.newPage();context.on('page',p=>{if(p!==page)p.close().catch(()=>{});});
 page.on('dialog',dialog=>dialog.dismiss());await page.goto(start.href,{waitUntil:'domcontentloaded',timeout:20000});
 const send=v=>process.stdout.write(JSON.stringify({jsonrpc:'2.0',...v})+'\n');
