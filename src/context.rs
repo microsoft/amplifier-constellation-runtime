@@ -182,7 +182,7 @@ fn note(items: &[Value], end: usize, bytes: usize, digest: &str) -> String {
 
 pub fn prepare(items: &[Value], policy: &Policy, budget: usize) -> Result<View> {
     let original_bytes = crate::media::context_bytes(items)?;
-    if original_bytes <= budget {
+    if original_bytes <= budget && crate::media::request_fits(items)? {
         return Ok(View {
             items: items.to_vec(),
             checkpoint: None,
@@ -217,7 +217,7 @@ pub fn prepare(items: &[Value], policy: &Policy, budget: usize) -> Result<View> 
         let mut view = vec![json!({"role":"user","content":[{"type":"input_text","text":text}]})];
         view.extend_from_slice(&items[end..]);
         let compacted_bytes = crate::media::context_bytes(&view)?;
-        if compacted_bytes <= budget {
+        if compacted_bytes <= budget && crate::media::request_fits(&view)? {
             return Ok(View {
                 items: view,
                 checkpoint: Some(
