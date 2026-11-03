@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{collections::HashSet, fs, io::Write, path::Path};
 
-pub const POLICY: &str = "responsibility-watch-v5";
+pub const POLICY: &str = "responsibility-watch-v6";
 // This only requests inspection, never execution. A majority winning choice
 // is sufficient; probabilities are not treated as calibrated guarantees.
 const THRESHOLD: f64 = 0.5;
@@ -165,7 +165,27 @@ struct Watch {
     status: String,
     seen: Vec<String>,
     #[serde(default)]
+    shadow_seen: Vec<String>,
+    #[serde(default)]
     notification: Option<Value>,
+}
+impl Watch {
+    fn has_seen(&self, event: &Event, observe_only: bool) -> bool {
+        let key = event_key(event);
+        self.seen.contains(&key) || (observe_only && self.shadow_seen.contains(&key))
+    }
+    fn remember(&mut self, events: &[Event], observe_only: bool) {
+        // Shadow evaluation is deduplicated without consuming the live cursor.
+        let seen = if observe_only {
+            &mut self.shadow_seen
+        } else {
+            &mut self.seen
+        };
+        seen.extend(events.iter().map(event_key));
+        if seen.len() > 256 {
+            seen.drain(..seen.len() - 256);
+        }
+    }
 }
 #[derive(Clone, Deserialize, Serialize)]
 struct Candidate {
@@ -182,6 +202,8 @@ struct Pending {
     expires_ms: u64,
     candidates: Vec<Candidate>,
     request: Request,
+    #[serde(default)]
+    observe_only: bool,
 }
 #[derive(Default, Deserialize, Serialize)]
 struct Store {
@@ -341,6 +363,7 @@ impl Store {
                     spec,
                     status: "armed".into(),
                     seen,
+                    shadow_seen: vec![],
                     notification: None,
                 };
                 let result = json!({"watch":view(&w),"existing":false});
@@ -391,6 +414,7 @@ impl Store {
                 );
                 let keys: HashSet<_> = input.events.iter().map(event_key).collect();
                 w.seen.retain(|key| !keys.contains(key));
+                w.shadow_seen.retain(|key| !keys.contains(key));
                 self.pending = None;
                 Ok(json!({"recheck":w.id,"policy":POLICY,"expires_ms":w.expires_ms}))
             }
@@ -413,7 +437,7 @@ impl Store {
                         .iter()
                         .filter(|e| {
                             w.spec.kinds.contains(&e.kind)
-                                && !w.seen.contains(&event_key(e))
+                                && !w.has_seen(e, observe_only)
                                 && predicate.matches(e)
                         })
                         .cloned()
@@ -425,10 +449,7 @@ impl Store {
                         "policy":POLICY,"observed_ms":now,"wake":true,"shadow":observe_only,
                         "evaluator":"predicate","predicate":predicate,"evidence":evidence,
                         "guidance":"Inspect current observations before continuing the existing responsibility. This notification grants no new authority."});
-                    w.seen.extend(evidence.iter().map(event_key));
-                    if w.seen.len() > 256 {
-                        w.seen.drain(..w.seen.len() - 256);
-                    }
+                    w.remember(&evidence, observe_only);
                     if !observe_only {
                         w.status = "triggered".into();
                         w.notification = Some(receipt.clone());
@@ -461,9 +482,7 @@ impl Store {
                     let events: Vec<_> = input
                         .events
                         .iter()
-                        .filter(|e| {
-                            w.spec.kinds.contains(&e.kind) && !w.seen.contains(&event_key(e))
-                        })
+                        .filter(|e| w.spec.kinds.contains(&e.kind) && !w.has_seen(e, observe_only))
                         .take(24)
                         .cloned()
                         .collect();
@@ -508,6 +527,7 @@ impl Store {
                     expires_ms: now + 15000,
                     candidates,
                     request,
+                    observe_only,
                 };
                 let out = json!({"token":pending.token,"request":pending.request,"policy":POLICY});
                 self.pending = Some(pending);
@@ -525,6 +545,9 @@ impl Store {
                     .filter(|p| p.token == token)
                     .context("Evaluation expired or superseded")?
                     .clone();
+                // A mode change may downgrade an in-flight live evaluation,
+                // but cannot promote a shadow evaluation into a notification.
+                let observe_only = observe_only || pending.observe_only;
                 let answers = result["answers"]
                     .as_array()
                     .context("Missing decision answers")?;
@@ -616,10 +639,7 @@ impl Store {
                         receipts.push(json!({"id":w.id,"discarded":"stale_or_cancelled"}));
                         continue;
                     }
-                    w.seen.extend(candidate.events.iter().map(event_key));
-                    if w.seen.len() > 256 {
-                        w.seen.drain(..w.seen.len() - 256);
-                    }
+                    w.remember(&candidate.events, observe_only);
                     let receipt = json!({"id":w.id,"label":w.spec.label,"condition":w.spec.condition,"any_of":w.spec.any_of,"matched_conditions":matched_conditions,
                         "task_id":w.task_id,"policy":POLICY,"observed_ms":now,"wake":wake,"shadow":observe_only,
                         "evidence":candidate.events,"decisions":matching_answers,
@@ -764,6 +784,228 @@ mod tests {
                 .is_none()
             );
         }
+    }
+    #[test]
+    fn shadow_predicate_match_remains_available_to_live_poll_after_reload() {
+        for mode in ["new_events", "current_state"] {
+            let d = tempfile::tempdir().unwrap();
+            let file = d.path().join("watch.json");
+            let armed = apply(&file, input(predicate_arm(mode), stock(json!(0))), 1000).unwrap();
+            let events = stock(json!(20));
+            let shadow = json!({"operation":"prepare","observe_only":true});
+            let r = apply(&file, input(shadow.clone(), events.clone()), 2000).unwrap();
+            assert_eq!(r["receipts"][0]["wake"], true);
+            assert_eq!(r["receipts"][0]["shadow"], true);
+            let list = apply(
+                &file,
+                input(json!({"operation":"list"}), events.clone()),
+                2100,
+            )
+            .unwrap();
+            assert_eq!(list["watches"][0]["status"], "armed");
+            assert!(list["watches"][0]["notification"].is_null());
+            assert!(
+                apply(&file, input(shadow, events.clone()), 2200)
+                    .unwrap()
+                    .get("receipts")
+                    .is_none()
+            );
+            let live = apply(
+                &file,
+                input(json!({"operation":"prepare"}), events.clone()),
+                2300,
+            )
+            .unwrap();
+            assert_eq!(live["receipts"][0]["wake"], true);
+            assert_eq!(live["receipts"][0]["shadow"], false);
+            let list = apply(
+                &file,
+                input(json!({"operation":"list"}), events.clone()),
+                2400,
+            )
+            .unwrap();
+            assert_eq!(list["calls_this_hour"], 0);
+            assert_eq!(list["watches"][0]["status"], "triggered");
+            assert_eq!(
+                list["watches"][0]["expires_ms"],
+                armed["watch"]["expires_ms"]
+            );
+            assert!(
+                apply(&file, input(json!({"operation":"prepare"}), events), 2500)
+                    .unwrap()
+                    .get("receipts")
+                    .is_none()
+            );
+        }
+    }
+    #[test]
+    fn shadow_semantic_evaluation_does_not_consume_live_evidence_or_promote_in_flight() {
+        for (prepare_shadow, resolve_shadow) in [(true, true), (false, true), (true, false)] {
+            for choice in ["wake", "hold"] {
+                let d = tempfile::tempdir().unwrap();
+                let file = d.path().join("watch.json");
+                apply(&file, input(arm(), json!([])), 1000).unwrap();
+                let events = json!([event("new", "message", "Done; inspect it")]);
+                let p = apply(
+                    &file,
+                    input(
+                        json!({"operation":"prepare","observe_only":prepare_shadow}),
+                        events.clone(),
+                    ),
+                    2000,
+                )
+                .unwrap();
+                let r = apply(
+                    &file,
+                    input(
+                        json!({"operation":"resolve","token":p["token"],"result":answer(&p,choice),"observe_only":resolve_shadow}),
+                        events.clone(),
+                    ),
+                    2100,
+                )
+                .unwrap();
+                assert_eq!(r["receipts"][0]["shadow"], true);
+                let list = apply(
+                    &file,
+                    input(json!({"operation":"list"}), events.clone()),
+                    2200,
+                )
+                .unwrap();
+                assert_eq!(list["watches"][0]["status"], "armed");
+                assert!(list["watches"][0]["notification"].is_null());
+                assert_eq!(
+                    apply(
+                        &file,
+                        input(json!({"operation":"prepare"}), events.clone()),
+                        2300,
+                    )
+                    .unwrap()["skip"],
+                    "cooldown"
+                );
+                assert_eq!(
+                    apply(
+                        &file,
+                        input(
+                            json!({"operation":"prepare","observe_only":true}),
+                            events.clone()
+                        ),
+                        7100,
+                    )
+                    .unwrap()["skip"],
+                    "no_new_selected_evidence"
+                );
+                let p = apply(
+                    &file,
+                    input(json!({"operation":"prepare"}), events.clone()),
+                    7200,
+                )
+                .unwrap();
+                assert!(p.get("request").is_some());
+                let r = apply(
+                    &file,
+                    input(
+                        json!({"operation":"resolve","token":p["token"],"result":answer(&p,"wake")}),
+                        events.clone(),
+                    ),
+                    7300,
+                )
+                .unwrap();
+                assert_eq!(r["receipts"][0]["shadow"], false);
+                assert_eq!(r["receipts"][0]["wake"], true);
+                let list = apply(&file, input(json!({"operation":"list"}), events), 7400).unwrap();
+                assert_eq!(list["watches"][0]["status"], "triggered");
+                assert_eq!(list["calls_this_hour"], 2);
+            }
+        }
+    }
+    #[test]
+    fn shadow_recheck_and_legacy_store_preserve_expiry_and_call_budget() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("watch.json");
+        let armed = apply(&file, input(arm(), json!([])), 1000).unwrap();
+        let events = json!([event("new", "message", "Done; inspect it")]);
+        let shadow = json!({"operation":"prepare","observe_only":true});
+        let p = apply(&file, input(shadow.clone(), events.clone()), 2000).unwrap();
+        apply(
+            &file,
+            input(
+                json!({"operation":"resolve","token":p["token"],"result":answer(&p,"wake"),"observe_only":true}),
+                events.clone(),
+            ),
+            2100,
+        )
+        .unwrap();
+        apply(
+            &file,
+            input(
+                json!({"operation":"recheck","id":armed["watch"]["id"]}),
+                events.clone(),
+            ),
+            2200,
+        )
+        .unwrap();
+        assert_eq!(
+            apply(&file, input(shadow.clone(), events.clone()), 2300).unwrap()["skip"],
+            "cooldown"
+        );
+        let p = apply(&file, input(shadow, events.clone()), 7100).unwrap();
+        assert!(p.get("request").is_some());
+
+        // Old stores have only the shared seen cursor and no lease mode.
+        // Recheck must load them and recover current evidence without rearming.
+        let mut legacy: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        let watch = legacy["watches"][0].as_object_mut().unwrap();
+        watch.remove("shadow_seen");
+        watch["seen"] = json!([event_key(
+            &serde_json::from_value(events[0].clone()).unwrap()
+        )]);
+        legacy["pending"]
+            .as_object_mut()
+            .unwrap()
+            .remove("observe_only");
+        fs::write(&file, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let recheck = apply(
+            &file,
+            input(
+                json!({"operation":"recheck","id":armed["watch"]["id"]}),
+                events.clone(),
+            ),
+            7200,
+        )
+        .unwrap();
+        assert_eq!(recheck["expires_ms"], armed["watch"]["expires_ms"]);
+        assert_eq!(
+            apply(
+                &file,
+                input(json!({"operation":"prepare"}), events.clone()),
+                7300
+            )
+            .unwrap()["skip"],
+            "cooldown"
+        );
+        let p = apply(
+            &file,
+            input(json!({"operation":"prepare"}), events.clone()),
+            12200,
+        )
+        .unwrap();
+        assert!(p.get("request").is_some());
+        apply(
+            &file,
+            input(
+                json!({"operation":"resolve","token":p["token"],"result":answer(&p,"wake")}),
+                events.clone(),
+            ),
+            12300,
+        )
+        .unwrap();
+        let list = apply(&file, input(json!({"operation":"list"}), events), 12400).unwrap();
+        assert_eq!(list["calls_this_hour"], 3);
+        assert_eq!(list["watches"][0]["status"], "triggered");
+        assert_eq!(
+            list["watches"][0]["expires_ms"],
+            armed["watch"]["expires_ms"]
+        );
     }
     #[test]
     fn semantic_current_state_checks_existing_evidence_but_discards_stale_results() {

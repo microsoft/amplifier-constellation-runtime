@@ -119,6 +119,31 @@ provider SDK or credential mechanism is introduced. The pure Rust module has no
 Minecraft imports. The Minecraft bridge projects public game facts, exposes tools,
 and uses the existing authorized task wake mechanism.
 
+## Switching between observation and delivery
+
+`observe_only` is a host-selected option on each poll, not an immutable property
+of a watch or installation. Shadow evaluation keeps its own persistent evidence
+history: repeated shadow polls do not produce duplicate receipts or model calls,
+and they do not consume the evidence needed for a later live evaluation.
+After switching to `observe_only: false`, unchanged evidence still present in the
+host's input can trigger an armed watch. Exact predicates check it locally;
+semantic watches request a fresh decision, subject to the existing cooldown and
+hourly budget. A shadow result is never automatically promoted into a live wake.
+
+For semantic evaluations, a lease prepared in observe-only mode remains
+observe-only when resolved, even if the host changes mode while the call is in
+flight. A live lease can also be resolved as observe-only. In either case, a
+subsequent live poll may evaluate the same current evidence. Initial
+`new_events` baselines, expiry, task authority, and the single-notification limit
+are unchanged. `recheck` clears current evidence from both histories without
+resetting expiry or the model-call budget.
+
+This separation starts with `responsibility-watch-v6`. Existing stores still
+load, but older versions recorded shadow and live observations in the same
+history, so those earlier observations cannot be distinguished retroactively.
+When promoting an older still-armed watch, use `recheck` with its current evidence
+once after upgrading. This also discards any evaluation lease from the old policy.
+
 ## Lifecycle and limits
 
 At most three outstanding watches, each lasting 30–1800 seconds and no longer than
