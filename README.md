@@ -133,3 +133,12 @@ Use of Microsoft trademarks or logos in modified versions of this project must n
 Any use of third-party trademarks or logos are subject to those third-party's policies.
 
 See [bounded continuation advice](docs/continuation.md) for receipt-based recovery and remaining-budget checks, and [attention watches](docs/watches.md) for current-state and exact-predicate contracts. Both are optional host helpers; standard ACP agents remain independent.
+
+Optional MCP integrations can set
+`_meta["io.github.bkrabach.agent-runtime"].optional: true` on their ACP MCP
+descriptor. Failed optional discovery is bounded to five seconds and leaves other
+connections usable, with a redacted degraded-connection report in the agent's
+instructions, `runtime_capabilities`, and turn observations. Server aliases retain
+the original descriptor index. Required connections remain required. Reload a
+session to retry discovery; uncertain tool actions are never automatically replayed.
+This is an optional namespaced extension, not a requirement of standard ACP.

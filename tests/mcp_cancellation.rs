@@ -298,3 +298,45 @@ done
     assert!(error.to_string().contains("quarantined"));
     assert!(tools.cancel_pending().await.is_empty());
 }
+
+#[tokio::test]
+async fn optional_failure_keeps_following_server_alias_and_required_failure_stays_fatal() {
+    let fixture = HttpFixture::start(false).await;
+    let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", dead.local_addr().unwrap());
+    drop(dead);
+    let mut broken = json!({"type":"http","name":"optional-world","url":url,"headers":[{"name":"Authorization","value":"PRIVATE-TOKEN"}],"_meta":{"io.github.bkrabach.agent-runtime":{"optional":true}}});
+    let healthy = json!({"type":"http","name":"project","url":fixture.url,"headers":[{"name":"Authorization","value":"Bearer fixture-only"}]});
+    let tools = Tools::connect(&[broken.clone(), healthy.clone()])
+        .await
+        .unwrap();
+    assert_eq!(tools.unavailable.len(), 1);
+    assert!(
+        !serde_json::to_string(&tools.unavailable)
+            .unwrap()
+            .contains("PRIVATE-TOKEN")
+    );
+    assert!(
+        !serde_json::to_string(&tools.unavailable)
+            .unwrap()
+            .contains(&url)
+    );
+    assert!(tools.tools.contains_key("mcp_1_fast"));
+    assert_eq!(
+        tools.call("mcp_1_fast", json!({})).await.unwrap()["content"][0]["text"],
+        "new operation"
+    );
+    let tools = Arc::new(tools);
+    let calling = tools.clone();
+    let call = tokio::spawn(async move { calling.call("mcp_1_slow", json!({})).await });
+    tokio::time::timeout(Duration::from_secs(3), fixture.started.notified())
+        .await
+        .unwrap();
+    call.abort();
+    assert!(call.await.unwrap_err().is_cancelled());
+    let reports = tools.cancel_pending().await;
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].server_index, 1);
+    broken.as_object_mut().unwrap().remove("_meta");
+    assert!(Tools::connect(&[broken, healthy]).await.is_err());
+}
