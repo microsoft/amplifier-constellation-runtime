@@ -153,7 +153,7 @@ class Tests(unittest.TestCase):
         r=self.prompt(c,s,'new prompt');self.assertIn('different provider',r['error']['message']);self.assertEqual(len(self.server.case['requests']),2)
     def test_permission_denial_is_not_bypassed_by_a_new_provider(self):
         self.setup_kind('gemini');c=self.client();s=c.call('session/new',{'cwd':str(self.work),'mcpServers':[]})['result']['sessionId'];self.assertEqual(self.prompt(c,s,approve=False)['result']['stopReason'],'end_turn');self.assertFalse((self.work/'provider-proof.txt').exists())
-        self.assertIn('Permission declined',json.dumps(self.server.case['requests'][1][1]))
+        self.assertIn('The client declined this action; no action performed',json.dumps(self.server.case['requests'][1][1]))
     def test_azure_bearer_and_api_version_are_explicit(self):
         self.setup_kind('azure-openai');p=self.home/'runtime.json';cfg=json.loads(p.read_text());cfg['provider'].update(auth='bearer',api_version='fixture-version');p.write_text(json.dumps(cfg));c=self.client();s=c.call('session/new',{'cwd':str(self.work),'mcpServers':[]})['result']['sessionId'];self.prompt(c,s)
         h,b,path=self.server.case['requests'][0];h={k.lower():v for k,v in h.items()};self.assertEqual(h['authorization'],'Bearer '+KEY);self.assertNotIn('api-key',h);self.assertTrue(path.endswith('?api-version=fixture-version'))
