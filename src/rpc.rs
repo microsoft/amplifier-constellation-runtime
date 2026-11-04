@@ -89,10 +89,9 @@ impl Peer {
         title: &str,
         input: &Value,
         cancel: &CancellationToken,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         let result=self.call("session/request_permission",json!({"sessionId":sid,"toolCall":{"toolCallId":call,"title":title,"kind":"other","status":"pending","rawInput":input},"options":[{"optionId":"allow_once","name":"Allow once","kind":"allow_once"},{"optionId":"reject_once","name":"Decline","kind":"reject_once"}]}),cancel).await?;
-        Ok(result["outcome"]["outcome"] == "selected"
-            && result["outcome"]["optionId"] == "allow_once")
+        permission_result(&result)
     }
 }
 pub async fn frame<R: tokio::io::AsyncBufRead + Unpin>(r: &mut R) -> Result<Option<Value>> {
@@ -117,4 +116,48 @@ pub async fn frame<R: tokio::io::AsyncBufRead + Unpin>(r: &mut R) -> Result<Opti
         }
     }
     Ok(Some(serde_json::from_slice(&bytes)?))
+}
+
+fn permission_result(result: &Value) -> Result<()> {
+    if result["outcome"]["outcome"] == "selected" && result["outcome"]["optionId"] == "allow_once" {
+        return Ok(());
+    }
+    // Only recognize fixed reason codes. Never repeat an arbitrary client's text
+    // as authority, and never let diagnostic metadata authorize an action.
+    let reason = match result["_meta"]["com.microsoft.amplifier.permission"]["reason"].as_str() {
+        Some("source_changed") => {
+            "The conversation or initiating source changed; this turn's action was cancelled. Re-evaluate unfinished work in the next current turn; this is not an external service permission failure"
+        }
+        Some("policy_changed") => "The client's approval policy changed; the action was cancelled",
+        Some("expired") => "The approval request expired before a decision",
+        _ if result["outcome"]["outcome"] == "selected" => "The client declined this action",
+        _ if result["outcome"]["outcome"] == "cancelled" => {
+            "The client cancelled this permission request"
+        }
+        _ => "The client did not provide a recognized permission decision",
+    };
+    bail!("{reason}; no action performed")
+}
+
+#[cfg(test)]
+mod permission_tests {
+    use super::*;
+    #[test]
+    fn diagnostics_explain_denials_but_never_grant_or_echo_untrusted_text() {
+        assert!(
+            permission_result(&json!({"outcome":{"outcome":"selected","optionId":"allow_once"}}))
+                .is_ok()
+        );
+        for (outcome, code, expected) in [
+            ("cancelled", "source_changed", "not an external service"),
+            ("cancelled", "expired", "expired"),
+            ("cancelled", "policy_changed", "policy changed"),
+            ("selected", "", "declined"),
+            ("cancelled", "secret malicious text", "cancelled"),
+        ] {
+            let error=permission_result(&json!({"outcome":{"outcome":outcome,"optionId":"reject_once"},"_meta":{"com.microsoft.amplifier.permission":{"reason":code}}})).unwrap_err().to_string();
+            assert!(error.contains(expected), "{error}");
+            assert!(!error.contains("secret malicious"));
+        }
+    }
 }
