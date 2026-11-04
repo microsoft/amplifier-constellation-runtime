@@ -12,6 +12,9 @@ pub fn definition(name: &str, description: &str, properties: Value, required: Ve
     json!({"type":"function","name":name,"description":description,"parameters":{"type":"object","properties":properties,"required":required,"additionalProperties":false},"strict":false})
 }
 pub fn definitions() -> Vec<Value> {
+    definitions_for_network(crate::config::CommandNetwork::Isolated)
+}
+pub fn definitions_for_network(network: crate::config::CommandNetwork) -> Vec<Value> {
     let mut result = vec![
         definition("clock", "Read the current UTC time.", json!({}), vec![]),
         definition(
@@ -34,7 +37,20 @@ pub fn definitions() -> Vec<Value> {
         ),
     ];
     if command_isolation().is_some() {
-        result.push(definition("workspace_run","Run a bounded local command in the agent's workspace. Isolated environment: workspace and system binaries only, no network, no host home, no provider credentials. Returns actual exit code and bounded stdout/stderr. Requires write permission.",json!({"command":{"type":"string"},"args":{"type":"array","items":{"type":"string"}}}),vec!["command","args"]));
+        let description = match network {
+            crate::config::CommandNetwork::Isolated => {
+                "Run a bounded local command in the agent's workspace. Workspace and system binaries only; networking disabled. No host home or provider credentials. Returns actual exit code and bounded stdout/stderr. Requires write permission."
+            }
+            crate::config::CommandNetwork::Inherit => {
+                "Run a bounded local command in the agent's workspace. Networking uses the enclosing installation's network and firewall, so repository checkout and dependency downloads can be attempted. Workspace filesystem boundaries remain enforced; no host home or provider credentials. Returns actual exit code and bounded stdout/stderr. Requires write permission. Diagnose a failed connection before declaring all networking unavailable."
+            }
+        };
+        result.push(definition(
+            "workspace_run",
+            description,
+            json!({"command":{"type":"string"},"args":{"type":"array","items":{"type":"string"}}}),
+            vec!["command", "args"],
+        ));
     }
     result
 }
@@ -307,6 +323,10 @@ fn isolated_account() -> Result<tempfile::TempDir> {
 }
 #[cfg(not(windows))]
 async fn run(c: &Config, cwd: &Path, args: &Value) -> Result<Value> {
+    anyhow::ensure!(
+        c.command_network == crate::config::CommandNetwork::Isolated || cfg!(target_os = "linux"),
+        "Inherited command networking is currently supported on Linux only"
+    );
     ensure!(
         command_isolation().is_some(),
         "Isolated commands require Linux bubblewrap or macOS Seatbelt; no unrestricted fallback"
@@ -382,7 +402,7 @@ async fn run(c: &Config, cwd: &Path, args: &Value) -> Result<Value> {
             "/tmp",
             "--setenv",
             "PATH",
-            "/usr/bin:/bin",
+            "/usr/local/bin:/usr/bin:/bin",
             "--setenv",
             "LANG",
             "C.UTF-8",
@@ -391,6 +411,36 @@ async fn run(c: &Config, cwd: &Path, args: &Value) -> Result<Value> {
             cmd.arg("--ro-bind")
                 .arg(account.path().join(name))
                 .arg(format!("/etc/{name}"));
+        }
+        // Debian-family toolchains use these aliases from /usr/bin. Preserve
+        // only aliases resolving into the already exposed system tool tree;
+        // never mount the entire /etc directory or arbitrary alternatives.
+        for name in ["cc", "c++", "cpp", "awk", "pkg-config"] {
+            let alias = PathBuf::from(format!("/etc/alternatives/{name}"));
+            if let Ok(target) = std::fs::canonicalize(&alias)
+                && target.starts_with("/usr")
+                && target.is_file()
+            {
+                cmd.arg("--symlink").arg(target).arg(&alias);
+            }
+        }
+        if c.command_network == crate::config::CommandNetwork::Inherit {
+            // Keep filesystem, PID, environment and user isolation. Only the
+            // network namespace is inherited (including an outer container's
+            // network policy). Never bind /etc or a credential directory.
+            cmd.arg("--share-net");
+            for file in [
+                "/etc/resolv.conf",
+                "/etc/hosts",
+                "/etc/nsswitch.conf",
+                "/etc/ssl/certs/ca-certificates.crt",
+                "/etc/pki/tls/certs/ca-bundle.crt",
+                "/etc/ssl/ca-bundle.pem",
+            ] {
+                if Path::new(file).is_file() {
+                    cmd.arg("--ro-bind").arg(file).arg(file);
+                }
+            }
         }
         for root in &roots {
             cmd.arg("--bind").arg(root).arg(root);

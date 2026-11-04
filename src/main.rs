@@ -410,7 +410,7 @@ async fn main() -> Result<()> {
         }
         Command::Check => println!(
             "{}",
-            serde_json::json!({"valid":true,"engine":"native-rust","provider":config.provider.kind,"model":config.provider.model,"authentication_method":config.provider.auth,"api_key_present":config.provider.auth!=ProviderAuth::Chatgpt && std::env::var(&config.provider.api_key_env).is_ok_and(|v|!v.trim().is_empty()),"chatgpt_account_configured":config.provider.chatgpt_credentials_file.as_ref().is_some_and(|p|p.is_file()),"authentication_verified":false,"local_commands_available":agent_runtime::tools::command_isolation().is_some(),"local_command_isolation":agent_runtime::tools::command_isolation(),"mode":config.mode,"version":env!("CARGO_PKG_VERSION")})
+            serde_json::json!({"valid":true,"engine":"native-rust","provider":config.provider.kind,"model":config.provider.model,"authentication_method":config.provider.auth,"api_key_present":config.provider.auth!=ProviderAuth::Chatgpt && std::env::var(&config.provider.api_key_env).is_ok_and(|v|!v.trim().is_empty()),"chatgpt_account_configured":config.provider.chatgpt_credentials_file.as_ref().is_some_and(|p|p.is_file()),"authentication_verified":false,"local_commands_available":agent_runtime::tools::command_isolation().is_some(),"local_command_isolation":agent_runtime::tools::command_isolation(),"local_command_network":config.command_network,"mode":config.mode,"version":env!("CARGO_PKG_VERSION")})
         ),
         Command::Sessions => println!("{}", store.list(None, None)?),
         Command::HistoryQuery { file } => {
