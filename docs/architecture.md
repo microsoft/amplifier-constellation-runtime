@@ -32,7 +32,7 @@ Each exercised session is pinned to its provider, endpoint, model/deployment, an
 
 Before a tool effect, the function call is persisted. The actual returned result is then persisted. Recovery supplies an explicit unknown-outcome result for unmatched calls; it never executes the old call again. Session mutation and tool execution are protected by an installation-local lock file per session. Multiple independent sessions can run concurrently within configured process capacity.
 
-File operations use a directory capability rooted in the workspace. Parent traversal, symlink escape, writes through hard links, non-regular file access, and oversized reads/writes are rejected. Linux commands run in bubblewrap with a bounded workspace and system binaries, separate process group, no network, and a clean environment. Command cancellation terminates the group. There is no unrestricted fallback.
+File operations use a directory capability rooted in the workspace. Parent traversal, symlink escape, writes through hard links, non-regular file access, and oversized reads/writes are rejected. Linux commands run in bubblewrap with a bounded workspace and system binaries, separate process group, owner-controlled networking (disabled by default), and a clean environment. Command cancellation terminates the group. There is no unrestricted fallback.
 
 Linux command environments include read-only synthetic `passwd` and `group`
 entries for the current mapped identity, named `agent`. This supports ordinary
@@ -50,3 +50,47 @@ The model key is read from the configured environment variable. The standalone e
 The protocol implementation follows [ACP initialization](https://agentclientprotocol.com/protocol/v1/initialization), [sessions](https://agentclientprotocol.com/protocol/v1/session-setup), [tools](https://agentclientprotocol.com/protocol/v1/tool-calls), and [cancellation](https://agentclientprotocol.com/protocol/v1/cancellation). Provider iteration follows [OpenAI function calling](https://developers.openai.com/api/docs/guides/function-calling) and [reasoning continuation](https://developers.openai.com/api/docs/guides/reasoning). MCP transports follow the [2025-06-18 transport specification](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports).
 
 Old Codex engine sessions are not native engine sessions. Migrating an existing agent needs an explicit source-history and state migration plan, with provenance and rollback. Sharing an ACP interface does not make providers' internal history formats interchangeable.
+
+## Command networking
+
+The owner can set `command_network` to `inherit` on Linux, independently of
+workspace filesystem grants. The default, `isolated`, preserves the existing
+network-disabled behavior. This setting is installation configuration, never a
+model tool argument or an ACP client's permission request. It applies when the
+runtime reconnects. The CLI configuration API, configuration schema, `check`,
+model tool description and `runtime_capabilities` expose the effective policy.
+
+`inherit` shares the enclosing process's network namespace. A container's
+firewall still applies; on a host this can include its LAN and local services.
+It is not an internet-only firewall. Filesystem/process isolation, cleared
+environment, workspace grants, synthetic account, cancellation and deadlines
+remain enforced. Only resolver/hosts/NSS files and known CA bundles are mounted
+read-only for DNS and HTTPS; host credential directories are not mounted. GitHub
+MCP credentials remain separate from the shell. Authenticated pushes can use the
+configured GitHub tools; this option does not inject their tokens into commands.
+
+macOS and Windows currently reject `inherit` rather than silently promising
+network access. Their existing isolated command behavior is unchanged.
+
+## Refreshed client context
+
+A runtime can advertise `_meta["com.microsoft.amplifier.context-snapshot"]`
+with `version: 1`, `contentBlocks: true`, and `originalHistoryPreserved: true`
+in ACP initialization. Supporting clients may mark a text block with the same
+namespace, `version: 1`, a publisher/conversation/audience-specific `key`, and
+`retainedText` containing the original request and essential continuation state.
+This is an optional extension, not a standard ACP requirement.
+
+Before ordinary budget compaction, the model view keeps the newest valid block
+for each key. Older versions retain their original position and retained text.
+Other user content, media, assistant output, tool pairs and provider state stay
+in order. Invalid/unmarked content stays unchanged. Original `_acp_prompt` and
+saved content are never rewritten; replay and `session_history` retrieve them.
+Archive hashes and item indexes refer to the durable original transcript.
+Clients must never reuse a key across audiences or put a one-time instruction
+only in the replaceable projection. Metadata grants no tool or source access.
+
+Permission cancellation may carry the optional fixed diagnostic reason in
+`_meta["com.microsoft.amplifier.permission"].reason`. The runtime distinguishes
+`source_changed`, `policy_changed`, and `expired` from rejection. These codes
+cannot grant permission, and unknown client text is not repeated as authority.

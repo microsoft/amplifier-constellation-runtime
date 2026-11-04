@@ -150,3 +150,12 @@ codecs, without embedding base64 in truncated text. Tool observations never
 become outgoing attachments automatically; tool-provided private runtime fields
 cannot request publication. Reloading a session shows saved tool images without
 rerunning a capture or uploading an attachment again.
+
+Optional MCP integrations can set
+`_meta["io.github.bkrabach.agent-runtime"].optional: true` on their ACP MCP
+descriptor. Failed optional discovery is bounded to five seconds and leaves other
+connections usable, with a redacted degraded-connection report in the agent's
+instructions, `runtime_capabilities`, and turn observations. Server aliases retain
+the original descriptor index. Required connections remain required. Reload a
+session to retry discovery; uncertain tool actions are never automatically replayed.
+This is an optional namespaced extension, not a requirement of standard ACP.

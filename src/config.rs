@@ -27,6 +27,9 @@ pub struct Config {
     pub provider: Provider,
     pub limits: Limits,
     pub mode: Mode,
+    /// Owner-controlled command networking, independent of filesystem grants.
+    #[serde(default)]
+    pub command_network: CommandNetwork,
     /// Compact completed turns for model requests; full history stays saved.
     #[serde(default)]
     pub context: crate::context::Policy,
@@ -42,6 +45,17 @@ pub struct Config {
     pub allow_client_stdio_mcp: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decisions: Vec<crate::decisions::Backend>,
+}
+#[derive(
+    Clone, Copy, Default, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandNetwork {
+    #[default]
+    Isolated,
+    /// Inherit the enclosing Linux network namespace and its firewall policy.
+    /// This does not itself restrict access to public internet addresses.
+    Inherit,
 }
 #[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -247,6 +261,7 @@ impl Config {
                 max_parallel_turns: 4,
             },
             mode: Mode::Ask,
+            command_network: CommandNetwork::Isolated,
             context: Default::default(),
             allowed_mcp_mutations: vec![],
             trusted_mcp_readonly_urls: vec![],
@@ -260,6 +275,10 @@ impl Config {
         Ok(c)
     }
     pub fn validate(&self, home: &Path) -> Result<()> {
+        ensure!(
+            self.command_network == CommandNetwork::Isolated || cfg!(target_os = "linux"),
+            "Inherited command networking is currently supported on Linux only"
+        );
         self.context.validate()?;
         crate::decisions::validate_backends(&self.decisions)?;
         self.provider.native.validate(self.provider.kind)?;

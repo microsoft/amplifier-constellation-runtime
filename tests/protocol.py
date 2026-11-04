@@ -90,6 +90,15 @@ class Tests(unittest.TestCase):
         c=Client(self.home);self.clients.append(c);result=c.call('initialize',{'protocolVersion':1,'clientCapabilities':{}});self.assertTrue(result['result']['agentCapabilities']['loadSession']);return c
     def new(self,c,mcp=None):return c.call('session/new',{'cwd':str(self.work),'mcpServers':mcp or []})['result']['sessionId']
     def prompt(self,c,s,text,**kw):return c.call('session/prompt',{'sessionId':s,'prompt':[{'type':'text','text':text}]},**kw)
+    def test_refreshed_context_survives_resume_and_original_history_stays_available(self):
+        c=self.client();s=self.new(c)
+        def prompt(text,retained):return {'sessionId':s,'prompt':[{'type':'text','text':text,'_meta':{'com.microsoft.amplifier.context-snapshot':{'version':1,'key':'fixture:audience-a','retainedText':retained}}}]}
+        c.call('session/prompt',prompt('original-apricot old snapshot','First actual request'))
+        c.call('session/close',{'sessionId':s});c.call('session/load',{'sessionId':s,'cwd':str(self.work),'mcpServers':[]})
+        c.call('session/prompt',prompt('new snapshot','Second actual request'))
+        users=[x['content'] for x in REQUESTS[-1]['input'] if x.get('role')=='user']
+        self.assertIn('First actual request',users[0]);self.assertNotIn('original-apricot',users[0]);self.assertEqual(users[-1],'new snapshot')
+        self.prompt(c,s,'lookup archived');self.assertTrue(any('original-apricot' in json.dumps(u) for u in c.updates))
     def test_permission_denial_and_grant_are_actual_effects(self):
         c=self.client();s=self.new(c);self.prompt(c,s,'write it');self.assertFalse((self.work/'proof.txt').exists());self.assertEqual(len(c.callbacks),1)
         self.prompt(c,s,'write it again',approve=True);self.assertEqual((self.work/'proof.txt').read_text(),'verified payload');self.assertEqual(len(c.callbacks),2)

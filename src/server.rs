@@ -184,6 +184,8 @@ async fn handle(state: Arc<State>, msg: &Value) -> Result<Value> {
             Ordering::SeqCst,
         );
         let mut result = json!({"protocolVersion":1,"agentInfo":{"name":"agent-runtime","title":state.config.name,"version":env!("CARGO_PKG_VERSION")},"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"list":{},"resume":{},"close":{},"delete":{},"additionalDirectories":{}},"mcpCapabilities":{"http":true,"sse":false},"promptCapabilities":{"image":state.config.provider.native.image_input,"audio":state.config.provider.native.audio_input,"embeddedContext":true}},"authMethods":[],"_meta":{"io.github.bkrabach.agent-runtime":{"history":{"profile":"agent-runtime.history/1","storeId":state.store.identity()?},"clientStdioMcpAllowed":state.config.allow_client_stdio_mcp}}});
+        result["_meta"][crate::context::SNAPSHOT_META] =
+            json!({"version":1,"contentBlocks":true,"originalHistoryPreserved":true});
         if state.config.allow_client_system_prompt {
             result["agentCapabilities"]["sessionCapabilities"]["systemPrompt"] = json!({});
         }

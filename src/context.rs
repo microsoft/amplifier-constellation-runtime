@@ -181,6 +181,9 @@ fn note(items: &[Value], end: usize, bytes: usize, digest: &str) -> String {
 }
 
 pub fn prepare(items: &[Value], policy: &Policy, budget: usize) -> Result<View> {
+    let original = items;
+    let projected = refreshed_view(original);
+    let items = projected.as_slice();
     let original_bytes = crate::media::context_bytes(items)?;
     if original_bytes <= budget && crate::media::request_fits(items)? {
         return Ok(View {
@@ -207,7 +210,10 @@ pub fn prepare(items: &[Value], policy: &Policy, budget: usize) -> Result<View> 
         .saturating_sub(policy.retain_recent_turns + 1)
         .max(1);
     for &end in starts.iter().skip(preferred) {
-        let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&items[..end])?));
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&original[..end])?)
+        );
         let text = note(
             items,
             end,
@@ -229,4 +235,85 @@ pub fn prepare(items: &[Value], policy: &Policy, budget: usize) -> Result<View> 
     anyhow::bail!(
         "The current turn and its tool continuation exceed the context budget even after compacting completed turns. Increase the limit or split the work; no saved history was removed."
     )
+}
+
+/// Optional ACP content-block extension. A producer declares a refreshed view
+/// and the historical request that must remain when a later view supersedes it.
+pub const SNAPSHOT_META: &str = "com.microsoft.amplifier.context-snapshot";
+pub fn refreshed_view(items: &[Value]) -> Vec<Value> {
+    let mut seen = std::collections::HashSet::new();
+    let mut view = items.to_vec();
+    for item in view.iter_mut().rev() {
+        if item["role"] != "user" {
+            continue;
+        }
+        let Some(parts) = item["_acp_prompt"].as_array().cloned() else {
+            continue;
+        };
+        let text_only = item["content"].is_string()
+            && parts
+                .iter()
+                .all(|p| p["type"] == "text" && p["text"].is_string());
+        if text_only {
+            let expected = parts
+                .iter()
+                .filter_map(|p| p["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            if item["content"] != expected {
+                continue;
+            }
+            item["content"] = json!(
+                parts
+                    .iter()
+                    .map(|p| json!({"type":"input_text","text":p["text"]}))
+                    .collect::<Vec<_>>()
+            );
+        }
+        let Some(content) = item["content"].as_array_mut() else {
+            continue;
+        };
+        // Supported conversion is one content item per ACP block. Unknown
+        // conversions and malformed metadata stay unchanged, never guessed.
+        if parts.len() != content.len() {
+            continue;
+        }
+        for (part, output) in parts.iter().zip(content.iter_mut()).rev() {
+            let meta = &part["_meta"][SNAPSHOT_META];
+            if part["type"] != "text"
+                || output["type"] != "input_text"
+                || output["text"] != part["text"]
+                || meta["version"] != 1
+            {
+                continue;
+            }
+            let Some(key) = meta["key"]
+                .as_str()
+                .filter(|s| !s.is_empty() && s.len() <= 256)
+            else {
+                continue;
+            };
+            let Some(retained) = meta["retainedText"]
+                .as_str()
+                .filter(|s| !s.is_empty() && s.len() <= 32_768)
+            else {
+                continue;
+            };
+            if !seen.insert(key.to_owned()) {
+                output["text"] = json!(format!(
+                    "Historical request/context (the refreshed projection is supplied later; original text remains in session_history):\n{retained}"
+                ));
+            }
+        }
+        if text_only {
+            item["content"] = json!(
+                content
+                    .iter()
+                    .filter_map(|p| p["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            );
+        }
+    }
+    view
 }
