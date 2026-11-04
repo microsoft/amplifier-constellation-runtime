@@ -44,3 +44,18 @@ Timeouts, cancellation, authentication failures, or rate limits produce errors; 
 The actual OpenAI Decisions endpoint passed a predicate/choice/score check. All five providers have real-process protocol tests covering authentication, payload translation, normalization, malformed responses, refusal, and cancellation. JEV, Microsoft Decision One, H2O, and local-decisions have not been live-validated here because their credentials or running endpoints were unavailable. These checks establish integration behavior, not calibration or quality for an operational routing policy.
 
 References: [OpenAI Decisions](https://developers.openai.com/api/docs/guides/decisions), [JEV SystemOne](https://docs.typesafe.ai/api/system-one), [Microsoft Decision One](https://learn.microsoft.com/en-us/azure/foundry/foundry-models/how-to/use-foundry-models-microsoft-decision), [H2O Lightning](https://huggingface.co/h2oai/h2o-lightning-4b), and [Amplifier local-decisions](https://github.com/microsoft/amplifier-module-provider-local-decisions).
+
+## Ownership: social admission versus reasoning tools
+
+Reusable pre-turn social attention belongs to an installed Instance, for any ACP
+backend. A native runtime and a Codex-backed runtime can therefore receive the
+same ordinary admitted prompts. The runtime must not independently apply a second
+social gate to those prompts. A direct ACP client can still prompt this runtime
+without installing a host or opting into attention.
+
+This module remains useful for explicit within-turn typed decisions and existing
+agent-authored watches. Those advisory results do not grant tool permissions,
+create responsibilities, renew deadlines or prove task completion. The old
+unmerged `participate` CLI proposal is superseded by Instance's optional
+`com.microsoft.amplifier.attention` profile; it is not a runtime requirement.
+See the [family attention contract](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/attention.v1-candidate.md).
