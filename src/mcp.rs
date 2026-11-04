@@ -14,7 +14,9 @@ const STDIO_CANCEL_GRACE: Duration = Duration::from_millis(100);
 
 pub struct Tools {
     peers: Vec<Mutex<Connection>>,
+    server_indices: Vec<usize>,
     pub tools: BTreeMap<String, Tool>,
+    pub unavailable: Vec<Value>,
 }
 pub struct Tool {
     pub server: String,
@@ -82,7 +84,9 @@ impl Tools {
         ensure!(specs.len() <= 8, "At most eight MCP servers per session");
         let mut set = Self {
             peers: vec![],
+            server_indices: vec![],
             tools: BTreeMap::new(),
+            unavailable: vec![],
         };
         for (i, spec) in specs.iter().enumerate() {
             let name = spec["name"].as_str().context("MCP server name required")?;
@@ -90,70 +94,95 @@ impl Tools {
                 !name.is_empty() && name.len() <= 128,
                 "Invalid MCP server name"
             );
-            let mut peer = Connection::open(spec).await?;
-            let init=peer.request("initialize",json!({"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"agent-runtime","version":env!("CARGO_PKG_VERSION")}})).await?;
-            if let Some(Transport::Http { protocol, .. }) = &mut peer.transport {
-                let version = init["protocolVersion"]
-                    .as_str()
-                    .context("MCP protocol version missing")?;
-                ensure!(
-                    ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"].contains(&version),
-                    "Unsupported MCP version"
-                );
-                *protocol = version.into();
-            }
-            peer.notify("notifications/initialized", json!({})).await?;
-            let mut cursor = Value::Null;
-            for _ in 0..8 {
-                let params = if cursor.is_null() {
-                    json!({})
-                } else {
-                    json!({"cursor":cursor})
-                };
-                let list = peer.request("tools/list", params).await?;
-                for tool in list["tools"]
-                    .as_array()
-                    .context("MCP did not return a tool list")?
-                {
-                    ensure!(set.tools.len() < 120, "MCP tool budget exceeded");
-                    let original = tool["name"].as_str().context("MCP tool name missing")?;
-                    let alias = format!(
-                        "mcp_{i}_{}",
-                        original
-                            .chars()
-                            .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                                c
-                            } else {
-                                '_'
-                            })
-                            .take(52)
-                            .collect::<String>()
+            let optional = spec["_meta"]["io.github.bkrabach.agent-runtime"]["optional"] == true;
+            let index = set.peers.len();
+            let connection = async {
+                let mut definitions = BTreeMap::new();
+                let mut peer = Connection::open(spec).await?;
+                let init=peer.request("initialize",json!({"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"agent-runtime","version":env!("CARGO_PKG_VERSION")}})).await?;
+                if let Some(Transport::Http { protocol, .. }) = &mut peer.transport {
+                    let version = init["protocolVersion"]
+                        .as_str()
+                        .context("MCP protocol version missing")?;
+                    ensure!(
+                        ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"].contains(&version),
+                        "Unsupported MCP version"
                     );
-                    ensure!(!set.tools.contains_key(&alias), "MCP tool name collision");
-                    let definition = json!({"type":"function","name":alias,"description":format!("[{}] {}",name,tool["description"].as_str().unwrap_or(original)),"parameters":tool["inputSchema"],"strict":false});
-                    set.tools.insert(
-                        alias,
-                        Tool {
-                            server: name.into(),
-                            name: original.into(),
-                            definition,
-                            readonly: tool["annotations"]["readOnlyHint"] == true,
-                            endpoint: if spec["type"] == "http" {
-                                spec["url"].as_str().map(str::to_owned)
-                            } else {
-                                None
+                    *protocol = version.into();
+                }
+                peer.notify("notifications/initialized", json!({})).await?;
+                let mut cursor = Value::Null;
+                for _ in 0..8 {
+                    let params = if cursor.is_null() {
+                        json!({})
+                    } else {
+                        json!({"cursor":cursor})
+                    };
+                    let list = peer.request("tools/list", params).await?;
+                    for tool in list["tools"]
+                        .as_array()
+                        .context("MCP did not return a tool list")?
+                    {
+                        ensure!(definitions.len() < 120, "MCP tool budget exceeded");
+                        let original = tool["name"].as_str().context("MCP tool name missing")?;
+                        let alias = format!(
+                            "mcp_{i}_{}",
+                            original
+                                .chars()
+                                .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                                    c
+                                } else {
+                                    '_'
+                                })
+                                .take(52)
+                                .collect::<String>()
+                        );
+                        ensure!(!definitions.contains_key(&alias), "MCP tool name collision");
+                        let definition = json!({"type":"function","name":alias,"description":format!("[{}] {}",name,tool["description"].as_str().unwrap_or(original)),"parameters":tool["inputSchema"],"strict":false});
+                        definitions.insert(
+                            alias,
+                            Tool {
+                                server: name.into(),
+                                name: original.into(),
+                                definition,
+                                readonly: tool["annotations"]["readOnlyHint"] == true,
+                                endpoint: if spec["type"] == "http" {
+                                    spec["url"].as_str().map(str::to_owned)
+                                } else {
+                                    None
+                                },
+                                index,
                             },
-                            index: i,
-                        },
-                    );
+                        );
+                    }
+                    cursor = list.get("nextCursor").cloned().unwrap_or(Value::Null);
+                    if cursor.is_null() {
+                        break;
+                    }
                 }
-                cursor = list.get("nextCursor").cloned().unwrap_or(Value::Null);
-                if cursor.is_null() {
-                    break;
-                }
+                ensure!(cursor.is_null(), "MCP tool pages exceeded limit");
+                Ok::<_, anyhow::Error>((peer, definitions))
+            };
+            // Optional integrations must not hold unrelated sessions hostage. No
+            // tool calls are retried: this timeout covers discovery only.
+            let result = if optional {
+                tokio::time::timeout(Duration::from_secs(5), connection)
+                    .await
+                    .context("Optional MCP discovery timed out")
+                    .and_then(|r| r)
+            } else {
+                connection.await
+            };
+            match result {
+                Ok((peer, definitions)) => {
+                    ensure!(set.tools.len() + definitions.len() <= 120, "MCP tool budget exceeded");
+                    set.tools.extend(definitions);
+                    set.peers.push(Mutex::new(peer));
+                    set.server_indices.push(i);
+                },
+                Err(_) if optional => set.unavailable.push(json!({"name":name,"status":"unavailable","retry":"Reconnect or reload the session to retry discovery. No tool operation was replayed."})),
+                Err(error) => return Err(error.context(format!("Required MCP server {name} could not connect"))),
             }
-            ensure!(cursor.is_null(), "MCP tool pages exceeded limit");
-            set.peers.push(Mutex::new(peer));
         }
         Ok(set)
     }
@@ -170,12 +199,14 @@ impl Tools {
     /// still holds a peer lock. Notification attempts run concurrently and each
     /// is bounded. No interrupted request is replayed or retried here.
     pub async fn cancel_pending(&self) -> Vec<CancellationReport> {
-        futures_util::future::join_all(
-            self.peers
-                .iter()
-                .enumerate()
-                .map(|(index, peer)| async move { peer.lock().await.cancel_pending(index).await }),
-        )
+        futures_util::future::join_all(self.peers.iter().enumerate().map(
+            |(index, peer)| async move {
+                peer.lock()
+                    .await
+                    .cancel_pending(self.server_indices[index])
+                    .await
+            },
+        ))
         .await
         .into_iter()
         .flatten()
