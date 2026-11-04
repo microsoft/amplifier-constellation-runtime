@@ -65,6 +65,18 @@ async fn owner_can_enable_network_without_exposing_host_files_or_environment() {
     assert!(!env["stdout"].as_str().unwrap().contains("API_KEY="));
     let netfiles = tools::call(&config, &work, "workspace_run", &json!({"command":"/bin/sh","args":["-c","test -r /etc/resolv.conf && test -r /etc/ssl/certs/ca-certificates.crt && ! test -e /etc/shadow"]})).await.unwrap();
     assert_eq!(netfiles["success"], true, "{netfiles}");
+    if std::path::Path::new("/usr/bin/cc").is_file() {
+        std::fs::write(work.join("main.c"), "int main(void) { return 0; }\n").unwrap();
+        let build = tools::call(
+            &config,
+            &work,
+            "workspace_run",
+            &json!({"command":"/bin/sh","args":["-c","cc main.c -o check && ./check"]}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(build["success"], true, "{build}");
+    }
     let desc = tools::definitions_for_network(config.command_network);
     assert!(
         desc.iter().find(|t| t["name"] == "workspace_run").unwrap()["description"]

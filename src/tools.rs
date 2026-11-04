@@ -412,6 +412,18 @@ async fn run(c: &Config, cwd: &Path, args: &Value) -> Result<Value> {
                 .arg(account.path().join(name))
                 .arg(format!("/etc/{name}"));
         }
+        // Debian-family toolchains use these aliases from /usr/bin. Preserve
+        // only aliases resolving into the already exposed system tool tree;
+        // never mount the entire /etc directory or arbitrary alternatives.
+        for name in ["cc", "c++", "cpp", "awk", "pkg-config"] {
+            let alias = PathBuf::from(format!("/etc/alternatives/{name}"));
+            if let Ok(target) = std::fs::canonicalize(&alias)
+                && target.starts_with("/usr")
+                && target.is_file()
+            {
+                cmd.arg("--symlink").arg(target).arg(&alias);
+            }
+        }
         if c.command_network == crate::config::CommandNetwork::Inherit {
             // Keep filesystem, PID, environment and user isolation. Only the
             // network namespace is inherited (including an outer container's
