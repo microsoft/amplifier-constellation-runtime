@@ -544,6 +544,10 @@ impl Turn<'_> {
                     .as_object_mut()
                     .and_then(|o| o.remove("_acp_content"))
                     .unwrap_or(json!([]));
+                let tool_images = result
+                    .as_object_mut()
+                    .and_then(|o| o.remove("_tool_images"))
+                    .unwrap_or(json!([]));
                 let mut output = result.to_string();
                 if output.len() > self.config.limits.tool_output_bytes {
                     let mut end = self.config.limits.tool_output_bytes;
@@ -557,7 +561,7 @@ impl Turn<'_> {
                 }
                 self.session
                     .items
-                    .push(json!({"type":"function_call_output","call_id":call_id,"output":output,"_acp_content":media}));
+                    .push(json!({"type":"function_call_output","call_id":call_id,"output":output,"_acp_content":media,"_tool_images":tool_images}));
                 self.store.save(&self.session)?;
                 self.store.event(
                     &self.session.id,
@@ -567,6 +571,9 @@ impl Turn<'_> {
                 )?;
                 let mut blocks =
                     vec![json!({"type":"content","content":{"type":"text","text":output}})];
+                if let Some(images) = tool_images.as_array() {
+                    blocks.extend(images.iter().map(|m| json!({"type":"content","content":m})));
+                }
                 if let Some(ms) = media.as_array() {
                     for m in ms {
                         self.peer

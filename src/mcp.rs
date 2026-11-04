@@ -159,11 +159,12 @@ impl Tools {
     }
     pub async fn call(&self, alias: &str, args: Value) -> Result<Value> {
         let tool = self.tools.get(alias).context("MCP tool not available")?;
-        self.peers[tool.index]
+        let result = self.peers[tool.index]
             .lock()
             .await
             .request("tools/call", json!({"name":tool.name,"arguments":args}))
-            .await
+            .await?;
+        crate::media::mcp_observations(result)
     }
 
     /// Call after the turn's execution future has been dropped, so no tool call

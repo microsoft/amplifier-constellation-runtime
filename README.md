@@ -133,3 +133,20 @@ Use of Microsoft trademarks or logos in modified versions of this project must n
 Any use of third-party trademarks or logos are subject to those third-party's policies.
 
 See [bounded continuation advice](docs/continuation.md) for receipt-based recovery and remaining-budget checks, and [attention watches](docs/watches.md) for current-state and exact-predicate contracts. Both are optional host helpers; standard ACP agents remain independent.
+
+### Inspecting and sharing local images
+
+`workspace_view_image` reads a PNG/JPEG/GIF/WebP inside the session's granted
+workspace and gives the model visual evidence. `workspace_attach_image` explicitly
+attaches that saved image to the current ACP conversation (maximum 2 MiB). It
+follows the session's write/approval policy; viewing an image does not publish it.
+The ACP client decides how attachments are displayed or delivered, such as a
+Slack file upload. The runtime does not choose another destination or fetch a
+remote URL when attaching.
+
+Standard MCP image results are retained as attributed visual tool evidence and
+replayed in tool cards. Images are passed through the existing provider image
+codecs, without embedding base64 in truncated text. Tool observations never
+become outgoing attachments automatically; tool-provided private runtime fields
+cannot request publication. Reloading a session shows saved tool images without
+rerunning a capture or uploading an attachment again.

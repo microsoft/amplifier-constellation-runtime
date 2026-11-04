@@ -299,6 +299,11 @@ async fn handle(state: Arc<State>, msg: &Value) -> Result<Value> {
                         if let Some(ms) = item["_acp_content"].as_array() {
                             blocks.extend(ms.iter().map(|m| json!({"type":"content","content":m})));
                         }
+                        if let Some(images) = item["_tool_images"].as_array() {
+                            blocks.extend(
+                                images.iter().map(|m| json!({"type":"content","content":m})),
+                            );
+                        }
                         state.peer.update(sid,json!({"sessionUpdate":"tool_call_update","toolCallId":item["call_id"],"status":if failed{"failed"}else{"completed"},"content":blocks})).await?;
                     }
                     let mut replay = item.clone();

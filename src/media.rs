@@ -5,6 +5,59 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 pub const MAX_MEDIA: usize = 16 * 1024 * 1024;
+/// Sniff supported raster formats; never forward a text file as an image.
+pub fn image_mime(bytes: &[u8]) -> Result<&'static str> {
+    if bytes.len() >= 33 && bytes.starts_with(b"\x89PNG\r\n\x1a\n") && &bytes[12..16] == b"IHDR" {
+        Ok("image/png")
+    } else if bytes.len() >= 4 && bytes.starts_with(b"\xff\xd8\xff") {
+        Ok("image/jpeg")
+    } else if bytes.len() >= 13 && (bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")) {
+        Ok("image/gif")
+    } else if bytes.len() >= 20 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Ok("image/webp")
+    } else {
+        anyhow::bail!("File is not a supported raster image")
+    }
+}
+
+/// An MCP observation is evidence, never an instruction to publish. Drop
+/// externally supplied private runtime fields before adding our own projection.
+pub fn mcp_observations(mut result: Value) -> Result<Value> {
+    if let Some(o) = result.as_object_mut() {
+        o.remove("_acp_content");
+        o.remove("_tool_images");
+    }
+    let mut images = vec![];
+    let mut total = 0;
+    if let Some(content) = result["content"].as_array_mut() {
+        for part in content {
+            if part["type"] != "image" {
+                continue;
+            }
+            let data = part["data"].as_str().context("MCP image has no data")?;
+            let mime = part["mimeType"]
+                .as_str()
+                .context("MCP image has no MIME type")?;
+            validate_data(data, mime, false)?;
+            let bytes = STANDARD.decode(data)?;
+            ensure!(
+                image_mime(&bytes)? == mime,
+                "MCP image type does not match its bytes"
+            );
+            total += data.len();
+            ensure!(
+                images.len() < 4 && total <= MAX_MEDIA,
+                "MCP images exceed result budget"
+            );
+            images.push(json!({"type":"image","mimeType":mime,"data":data}));
+            *part = json!({"type":"text","text":format!("Tool image {} ({mime}, {} bytes) supplied separately as visual evidence. Not published.",images.len(),bytes.len())});
+        }
+    }
+    if !images.is_empty() {
+        result["_tool_images"] = json!(images);
+    }
+    Ok(result)
+}
 pub fn validate_data(data: &str, mime: &str, audio: bool) -> Result<()> {
     ensure!(data.len() <= MAX_MEDIA, "Media exceeds 16 MiB base64 limit");
     ensure!(
