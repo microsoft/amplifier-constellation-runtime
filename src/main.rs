@@ -79,6 +79,13 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Decide whether recent conversation warrants an agent turn. Use '-' for stdin.
+    Participate {
+        backend: String,
+        file: PathBuf,
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Manage bounded agent-authored attention watches; provider calls are separate.
     Watch {
         #[arg(long)]
@@ -345,29 +352,52 @@ async fn main() -> Result<()> {
         );
         return Ok(());
     }
-    if let Command::Decide { backend, file } | Command::Assess { backend, file, .. } = &args.command
+    if let Command::Decide { backend, file }
+    | Command::Assess { backend, file, .. }
+    | Command::Participate { backend, file, .. } = &args.command
     {
         let b = config
             .decisions
             .iter()
             .find(|b| b.name == *backend)
             .context("Decision backend is not configured")?;
-        ensure!(
-            std::fs::metadata(file)?.len() <= 256 * 1024,
-            "Decision input too large"
-        );
-        let bytes = std::fs::read(file)?;
+        let bytes =
+            if matches!(args.command, Command::Participate { .. }) && file.as_os_str() == "-" {
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                std::io::stdin()
+                    .take(256 * 1024 + 1)
+                    .read_to_end(&mut bytes)?;
+                bytes
+            } else {
+                ensure!(
+                    std::fs::metadata(file)?.len() <= 256 * 1024,
+                    "Decision input too large"
+                );
+                std::fs::read(file)?
+            };
+        ensure!(bytes.len() <= 256 * 1024, "Decision input too large");
         let req = if matches!(args.command, Command::Assess { .. }) {
             agent_runtime::assessment::request(serde_json::from_slice(&bytes)?)?
+        } else if matches!(args.command, Command::Participate { .. }) {
+            agent_runtime::participation::request(serde_json::from_slice(&bytes)?)?
         } else {
             serde_json::from_slice(&bytes)?
         };
-        if matches!(args.command, Command::Assess { dry_run: true, .. }) {
+        if matches!(
+            args.command,
+            Command::Assess { dry_run: true, .. } | Command::Participate { dry_run: true, .. }
+        ) {
             println!("{}", serde_json::to_string_pretty(&req)?);
             return Ok(());
         }
         let cancel = tokio_util::sync::CancellationToken::new();
         let result = tokio::select! {r=agent_runtime::decisions::evaluate(b,&req,&cancel)=>r?,_=tokio::signal::ctrl_c()=>{cancel.cancel();anyhow::bail!("Cancelled");}};
+        let result = if matches!(args.command, Command::Participate { .. }) {
+            agent_runtime::participation::outcome(&req, result)?
+        } else {
+            result
+        };
         println!("{}", serde_json::to_string_pretty(&result)?);
         return Ok(());
     }
@@ -440,6 +470,7 @@ async fn main() -> Result<()> {
         | Command::ConfigureDecision { .. }
         | Command::Decide { .. }
         | Command::Assess { .. }
+        | Command::Participate { .. }
         | Command::Watch { .. }
         | Command::Continuation { .. }
         | Command::Capabilities

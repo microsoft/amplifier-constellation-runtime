@@ -41,6 +41,38 @@ Timeouts, cancellation, authentication failures, or rate limits produce errors; 
 
 ## Validation
 
+### Conversation participation before a reasoning turn
+
+`agent-runtime --home /private/helper participate jev context.json` evaluates
+the shared `conversation-participation-v1` policy. Use `-` instead of a filename
+to read one JSON object from stdin, or `--dry-run` to inspect the typed request
+without contacting a provider. This is an optional helper for any ACP client and
+agent implementation; it does not require a native chat agent or extend ACP.
+
+The bounded context has `conversation_id`, `agent`, `participants`, `messages`,
+`trigger_id`, and optional `responsibilities`. Participants have `id`, `name`,
+optional `role` and `is_agent`; messages have `id`, `sender`, `text`, optional
+`recipients` and `reply_to`. Supply only evidence visible to this conversation's
+audience. Include the trigger and this agent among the known participants.
+The limit is 40 messages, 64 participants and 32 KiB of context.
+
+The policy considers implicit addressees, group questions, follow-ups, switching
+conversation partners, useful silence and duplicate responses. Names and mentions
+are clues, not prerequisites. The result binds `action: engage | hold` to the
+conversation and trigger IDs, retaining the normalized provider result and usage.
+Engagement requires an `engage` judgment with probability at least 0.6; uncertainty
+and refusals hold. These thresholds are policy choices, not calibrated guarantees.
+
+Clients must check that evidence is still current before admitting an agent turn.
+Changed conversation should be reassessed, not acted on using stale advice.
+Run on changed conversation evidence, not an idle timer that keeps prompting.
+Record decision attempts, actual gate admissions and actual reasoning-model
+requests separately. Retain direct-message contracts, cancellation and existing
+work limits. Admission is an invitation to reason, not permission to start work,
+renew an expired task or force a reply. The agent may still choose silence.
+Keep per-instance credentials, context and state local; no fleet coordinator is
+required. Experience adapters map native messages and enforce delivery boundaries.
+
 The actual OpenAI Decisions endpoint passed a predicate/choice/score check. All five providers have real-process protocol tests covering authentication, payload translation, normalization, malformed responses, refusal, and cancellation. JEV, Microsoft Decision One, H2O, and local-decisions have not been live-validated here because their credentials or running endpoints were unavailable. These checks establish integration behavior, not calibration or quality for an operational routing policy.
 
 References: [OpenAI Decisions](https://developers.openai.com/api/docs/guides/decisions), [JEV SystemOne](https://docs.typesafe.ai/api/system-one), [Microsoft Decision One](https://learn.microsoft.com/en-us/azure/foundry/foundry-models/how-to/use-foundry-models-microsoft-decision), [H2O Lightning](https://huggingface.co/h2oai/h2o-lightning-4b), and [Amplifier local-decisions](https://github.com/microsoft/amplifier-module-provider-local-decisions).

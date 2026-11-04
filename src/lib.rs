@@ -14,6 +14,7 @@ pub mod management;
 pub mod mcp;
 pub mod media;
 pub mod migrate;
+pub mod participation;
 pub mod provider;
 pub mod rpc;
 pub mod server;
