@@ -541,7 +541,13 @@ impl Turn<'_> {
                             )
                             .await
                     } else if is_mcp.is_some() {
-                        self.mcp.call(name, args).await
+                        // Ordinary tool observations become model-visible images.
+                        // Native computer calls consume the original MCP result
+                        // through their separate screenshot validation path.
+                        self.mcp
+                            .call(name, args)
+                            .await
+                            .and_then(crate::media::mcp_observations)
                     } else {
                         tools::call(self.config, &self.session.cwd, name, &args).await
                     }
@@ -557,6 +563,10 @@ impl Turn<'_> {
                     .as_object_mut()
                     .and_then(|o| o.remove("_acp_content"))
                     .unwrap_or(json!([]));
+                let tool_images = result
+                    .as_object_mut()
+                    .and_then(|o| o.remove("_tool_images"))
+                    .unwrap_or(json!([]));
                 let mut output = result.to_string();
                 if output.len() > self.config.limits.tool_output_bytes {
                     let mut end = self.config.limits.tool_output_bytes;
@@ -570,7 +580,7 @@ impl Turn<'_> {
                 }
                 self.session
                     .items
-                    .push(json!({"type":"function_call_output","call_id":call_id,"output":output,"_acp_content":media}));
+                    .push(json!({"type":"function_call_output","call_id":call_id,"output":output,"_acp_content":media,"_tool_images":tool_images}));
                 self.store.save(&self.session)?;
                 self.store.event(
                     &self.session.id,
@@ -580,6 +590,9 @@ impl Turn<'_> {
                 )?;
                 let mut blocks =
                     vec![json!({"type":"content","content":{"type":"text","text":output}})];
+                if let Some(images) = tool_images.as_array() {
+                    blocks.extend(images.iter().map(|m| json!({"type":"content","content":m})));
+                }
                 if let Some(ms) = media.as_array() {
                     for m in ms {
                         self.peer

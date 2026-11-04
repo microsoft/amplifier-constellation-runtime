@@ -41,6 +41,7 @@ jobs:
           COMMAND_TEST_TOKEN: must-not-reach-the-command
       - run: cargo build --locked
       - run: python tests/protocol.py
+      - run: python tests/images.py
       - run: python tests/providers.py
       - run: python tests/capabilities.py
       - run: python tests/computer.py

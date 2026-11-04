@@ -30,6 +30,18 @@ pub fn definitions_for_network(network: crate::config::CommandNetwork) -> Vec<Va
             vec!["path"],
         ),
         definition(
+            "workspace_view_image",
+            "Inspect a saved PNG, JPEG, GIF or WebP image inside the granted workspace. Returns visual evidence to you; does not attach or publish it to the conversation.",
+            json!({"path":{"type":"string"}}),
+            vec!["path"],
+        ),
+        definition(
+            "workspace_attach_image",
+            "Attach a saved PNG, JPEG, GIF or WebP image from the granted workspace to your current conversation as an ACP image. Use when the user requests sharing/showing that image. This sends the bytes to this client; it does not select or post to another channel. Maximum 2 MiB.",
+            json!({"path":{"type":"string"}}),
+            vec!["path"],
+        ),
+        definition(
             "workspace_write",
             "Write a UTF-8 file in the workspace. Requires the session's write permission. Parent folders are created as needed.",
             json!({"path":{"type":"string"},"content":{"type":"string"}}),
@@ -105,7 +117,7 @@ fn macos_profile(roots: &[PathBuf], scratch: &Path) -> Result<String> {
 pub fn mutation(name: &str) -> bool {
     matches!(
         name,
-        "workspace_write" | "workspace_run" | "workspace_save_artifact"
+        "workspace_write" | "workspace_run" | "workspace_save_artifact" | "workspace_attach_image"
     )
 }
 fn relative(c: &Config, cwd: &Path, input: &str) -> Result<(PathBuf, PathBuf)> {
@@ -177,6 +189,41 @@ pub async fn call(c: &Config, cwd: &Path, name: &str, args: &Value) -> Result<Va
     let (root, p) = relative(c, cwd, args["path"].as_str().context("Missing path")?)?;
     let root = Dir::open_ambient_dir(root, cap_std::ambient_authority())?;
     match name {
+        "workspace_view_image" | "workspace_attach_image" => {
+            use base64::Engine;
+            use std::io::Read;
+            let mut options = OpenOptions::new();
+            options.read(true);
+            #[cfg(unix)]
+            {
+                use cap_std::fs::OpenOptionsExt;
+                options.custom_flags(libc::O_NONBLOCK);
+            }
+            let f = root.open_with(p, &options)?;
+            ensure!(
+                f.metadata()?.is_file(),
+                "Only regular image files can be read"
+            );
+            const MAX_IMAGE: u64 = 2 * 1024 * 1024;
+            ensure!(
+                f.metadata()?.len() <= MAX_IMAGE,
+                "Image exceeds 2 MiB limit"
+            );
+            let mut bytes = Vec::new();
+            f.take(MAX_IMAGE + 1).read_to_end(&mut bytes)?;
+            ensure!(bytes.len() as u64 <= MAX_IMAGE, "Image exceeds 2 MiB limit");
+            let mime = crate::media::image_mime(&bytes)?;
+            let image = json!({"type":"image","mimeType":mime,"data":base64::engine::general_purpose::STANDARD.encode(&bytes)});
+            let key = if name == "workspace_attach_image" {
+                "_acp_content"
+            } else {
+                "_tool_images"
+            };
+            Ok(
+                json!({"path":args["path"],"bytes":bytes.len(),"mime_type":mime,
+                "attached_to_current_conversation":name == "workspace_attach_image", key:[image]}),
+            )
+        }
         "workspace_list" => {
             let entries=root.open_dir(p)?.entries()?.take(501).map(|e|e.map(|e|json!({"name":e.file_name().to_string_lossy(),"directory":e.file_type().is_ok_and(|t|t.is_dir())}))).collect::<Result<Vec<_>,_>>()?;
             Ok(
