@@ -528,7 +528,13 @@ impl Turn<'_> {
                             )
                             .await
                     } else if is_mcp.is_some() {
-                        self.mcp.call(name, args).await
+                        // Ordinary tool observations become model-visible images.
+                        // Native computer calls consume the original MCP result
+                        // through their separate screenshot validation path.
+                        self.mcp
+                            .call(name, args)
+                            .await
+                            .and_then(crate::media::mcp_observations)
                     } else {
                         tools::call(self.config, &self.session.cwd, name, &args).await
                     }
