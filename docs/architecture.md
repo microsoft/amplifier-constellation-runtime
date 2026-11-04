@@ -71,3 +71,26 @@ configured GitHub tools; this option does not inject their tokens into commands.
 
 macOS and Windows currently reject `inherit` rather than silently promising
 network access. Their existing isolated command behavior is unchanged.
+
+## Refreshed client context
+
+A runtime can advertise `_meta["com.microsoft.amplifier.context-snapshot"]`
+with `version: 1`, `contentBlocks: true`, and `originalHistoryPreserved: true`
+in ACP initialization. Supporting clients may mark a text block with the same
+namespace, `version: 1`, a publisher/conversation/audience-specific `key`, and
+`retainedText` containing the original request and essential continuation state.
+This is an optional extension, not a standard ACP requirement.
+
+Before ordinary budget compaction, the model view keeps the newest valid block
+for each key. Older versions retain their original position and retained text.
+Other user content, media, assistant output, tool pairs and provider state stay
+in order. Invalid/unmarked content stays unchanged. Original `_acp_prompt` and
+saved content are never rewritten; replay and `session_history` retrieve them.
+Archive hashes and item indexes refer to the durable original transcript.
+Clients must never reuse a key across audiences or put a one-time instruction
+only in the replaceable projection. Metadata grants no tool or source access.
+
+Permission cancellation may carry the optional fixed diagnostic reason in
+`_meta["com.microsoft.amplifier.permission"].reason`. The runtime distinguishes
+`source_changed`, `policy_changed`, and `expired` from rejection. These codes
+cannot grant permission, and unknown client text is not repeated as authority.

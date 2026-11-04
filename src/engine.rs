@@ -318,9 +318,12 @@ impl Turn<'_> {
                         "computer.intent",
                         json!({"call_id":call_id}),
                     )?;
-                    let allowed = self.session.mode != Mode::ReadOnly
-                        && self
-                            .peer
+                    let authorization = if self.session.mode == Mode::ReadOnly {
+                        Err(anyhow::anyhow!(
+                            "This session is read-only; no action performed"
+                        ))
+                    } else {
+                        self.peer
                             .permission(
                                 &self.session.id,
                                 call_id,
@@ -329,16 +332,15 @@ impl Turn<'_> {
                                 &self.cancel,
                             )
                             .await
-                            .unwrap_or(false);
-                    let result = if allowed {
+                    };
+                    let allowed = authorization.is_ok();
+                    let result = if let Err(error) = authorization {
+                        Err(error)
+                    } else {
                         self.mcp
                             .call(alias, args)
                             .await
                             .and_then(|r| computer.screenshot(&r))
-                    } else {
-                        Err(anyhow::anyhow!(
-                            "Computer action declined or unavailable; no action performed"
-                        ))
                     };
                     match result {
                         Ok(data) => {
@@ -359,13 +361,13 @@ impl Turn<'_> {
                             )?;
                             self.peer.update(&self.session.id,json!({"sessionUpdate":"tool_call_update","toolCallId":call_id,"status":"completed","content":[{"type":"content","content":{"type":"image","mimeType":"image/png","data":data}}]})).await?;
                         }
-                        Err(_) => {
+                        Err(error) => {
                             // No automatic retry: the external environment may have
                             // performed part of a failed batch. Preserve that uncertainty.
                             let note = if allowed {
-                                "The computer action did not return a verified screenshot. Its outcome is uncertain; inspect the environment before retrying."
+                                "The computer action did not return a verified screenshot. Its outcome is uncertain; inspect the environment before retrying.".to_owned()
                             } else {
-                                "The computer action was declined or unavailable. No action was performed."
+                                error.to_string()
                             };
                             if let Some(item) =
                                 self.session.items.iter_mut().rev().find(|i| {
@@ -430,17 +432,19 @@ impl Turn<'_> {
                     "tool.intent",
                     json!({"call_id":call_id,"name":name,"mutating":mutating}),
                 )?;
-                let allowed = if !mutating {
-                    true
+                let authorization = if !mutating {
+                    Ok(())
                 } else if self.session.mode == Mode::ReadOnly {
-                    false
+                    Err(anyhow::anyhow!(
+                        "This session is read-only; no action performed"
+                    ))
                 } else if let Some(tool) = is_mcp {
                     if tool.endpoint.as_ref().is_some_and(|url| {
                         self.config
                             .allowed_mcp_mutations
                             .contains(&format!("{url}#{}", tool.name))
                     }) {
-                        true
+                        Ok(())
                     } else {
                         self.peer
                             .permission(
@@ -451,10 +455,9 @@ impl Turn<'_> {
                                 &self.cancel,
                             )
                             .await
-                            .unwrap_or(false)
                     }
                 } else if self.session.mode == Mode::Workspace {
-                    true
+                    Ok(())
                 } else {
                     self.peer
                         .permission(
@@ -465,12 +468,9 @@ impl Turn<'_> {
                             &self.cancel,
                         )
                         .await
-                        .unwrap_or(false)
                 };
-                let result = if !allowed {
-                    Err(anyhow::anyhow!(
-                        "Permission declined or unavailable; no action performed"
-                    ))
+                let result = if let Err(error) = authorization {
+                    Err(error)
                 } else {
                     self.peer.update(&self.session.id,json!({"sessionUpdate":"tool_call_update","toolCallId":call_id,"status":"in_progress"})).await?;
                     if name == "user_input" {
