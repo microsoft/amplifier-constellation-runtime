@@ -90,7 +90,7 @@ impl Turn<'_> {
     }
     async fn execute(&mut self, turn: &str) -> Result<&'static str> {
         let provider = Provider::new(self.config)?;
-        let mut definitions = tools::definitions();
+        let mut definitions = tools::definitions_for_network(self.config.command_network);
         if self.config.client_form_elicitation {
             definitions.push(crate::elicitation::definition());
         }

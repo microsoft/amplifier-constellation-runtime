@@ -8,7 +8,7 @@ Workspace file tools and explicitly connected MCP tools are available on all thr
 
 | Platform | Command boundary | Scope |
 | --- | --- | --- |
-| Linux | `/usr/bin/bwrap` | Private mount/process/network namespaces, workspace writes, system binaries read-only, private temporary folder, clean environment |
+| Linux | `/usr/bin/bwrap` | Private mount/process namespaces, network disabled by default or explicitly inherited, workspace writes, system binaries read-only, private temporary folder, clean environment |
 | macOS | `/usr/bin/sandbox-exec` / Seatbelt | Default-deny profile, workspace/private scratch writes, system binaries read-only, no network or Launch Services, clean environment |
 | Windows | AppContainer + Job Object | Unique per-command identity, no network capabilities, checked workspace/private scratch permissions, explicit handle/environment allowlist, owned process tree |
 
