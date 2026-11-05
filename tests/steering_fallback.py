@@ -1,3 +1,4 @@
+from contextlib import closing
 """New inputs are ordered between HTTP calls, after real tool results, without cancelling work."""
 import json, socket, sqlite3, threading, unittest
 import providers
@@ -10,7 +11,7 @@ class Tests(providers.Tests):
         pid=c.request('session/prompt',{'sessionId':sid,'prompt':[{'type':'text','text':'Original work'}]});self.assertTrue(started.wait(5))
         c.call('_session/steering',{'sessionId':sid,'prompt':[{'type':'text','text':'x'*30000}],'_meta':{'steering':{'inputId':'oversized','idleBehavior':'promptRequired'}}})
         self.server.case['stall']=False;release.set();self.assertIn('error',c.finish(pid,approve=True));self.assertEqual(len(self.server.case['requests']),1)
-        with sqlite3.connect(self.home/'history.sqlite3') as db:self.assertEqual(db.execute("SELECT state FROM turn_inputs WHERE input_id='oversized'").fetchone()[0],'notAccepted')
+        with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:self.assertEqual(db.execute("SELECT state FROM turn_inputs WHERE input_id='oversized'").fetchone()[0],'notAccepted')
         # A refused candidate stays in its receipt, not in the next request's
         # active context. It must neither poison the session nor become a retry.
         self.assertEqual(self.prompt(c,sid,'What is 2 plus 2?')['result']['stopReason'],'end_turn')
@@ -50,7 +51,7 @@ class Tests(providers.Tests):
             self.assertEqual(len(self.server.case['requests']),3)
             self.assertNotIn(marker,json.dumps(self.server.case['requests'][2][1]))
             self.assertEqual((self.work/'provider-proof.txt').read_text(),providers.ARGS['content'])
-            with sqlite3.connect(self.home/'history.sqlite3') as db:
+            with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:
                 self.assertEqual(db.execute("SELECT state,recorded,reconciled FROM turn_inputs WHERE input_id='uncertain'").fetchone(),('unknown',0,1))
         finally:
             release.set();providers.Handler.do_POST=original
@@ -75,7 +76,7 @@ class Tests(providers.Tests):
                 if kind=='anthropic':
                     blocks=requests[1][1]['messages'][2]['content'];self.assertEqual(blocks[0]['type'],'tool_result')
                     self.assertEqual([b['text'] for b in blocks[1:]],['first-update','second-update'])
-                with sqlite3.connect(self.home/'history.sqlite3') as db:
+                with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:
                     rows=db.execute('SELECT state,recorded FROM turn_inputs WHERE session=? ORDER BY sequence',(sid,)).fetchall()
                     self.assertEqual(rows,[('incorporated',1),('incorporated',1)])
                     self.assertEqual(db.execute('SELECT count(*) FROM turns WHERE session=?',(sid,)).fetchone()[0],1)

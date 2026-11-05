@@ -1,3 +1,4 @@
+from contextlib import closing
 """Keep Anthropic server-tool continuation intact before adding queued input."""
 import json
 import sqlite3
@@ -28,7 +29,7 @@ class Tests(capabilities.Tests):
    self.assertEqual(bodies[1]['messages'][-1]['content'][0]['signature'],'signed')
    self.assertIn('Then explain the new question',json.dumps(bodies[2]))
    self.assertIn('web_search_tool_result',json.dumps(bodies[2]))
-   with sqlite3.connect(self.home/'history.sqlite3') as db:
+   with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:
     self.assertEqual(db.execute('SELECT state,recorded FROM turn_inputs').fetchall(),[('incorporated',1)])
     self.assertEqual(db.execute('SELECT COUNT(*) FROM turns').fetchone()[0],1)
   finally:

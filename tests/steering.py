@@ -1,3 +1,4 @@
+from contextlib import closing
 """Scripted real WebSocket + ACP tests. No model account, no sleeps for ordering."""
 import base64, hashlib, json, os, queue, socket, sqlite3, subprocess, tempfile, threading, unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -38,7 +39,7 @@ class Tests(unittest.TestCase):
     def steer(self,text,id):return self.c.call('_session/steering',{'sessionId':self.sid,'prompt':[{'type':'text','text':text}],'_meta':{'steering':{'idleBehavior':'promptRequired','inputId':id}}})
     def accepted(self,id,parent):self.event('response.steer.accepted',steer={'id':id,'previous_response_id':parent})
     def receipts(self):
-        with sqlite3.connect(self.home/'history.sqlite3') as db:return db.execute('SELECT input_id,state,recorded FROM turn_inputs ORDER BY sequence').fetchall()
+        with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:return db.execute('SELECT input_id,state,recorded FROM turn_inputs ORDER BY sequence').fetchall()
     def reconfigure(self, **limits):
         self.c.close();p=self.home/'runtime.json';cfg=json.loads(p.read_text());cfg['limits'].update(limits);cfg['context']['auto_compact']=False;p.write_text(json.dumps(cfg))
         self.c=protocol.Client(self.home);self.c.call('initialize',{'protocolVersion':1,'clientCapabilities':{}});self.c.call('session/load',{'sessionId':self.sid,'cwd':str(self.work),'mcpServers':[]})
@@ -99,7 +100,7 @@ class Tests(unittest.TestCase):
         second=self.frame();self.assertEqual(second['type'],'response.steer');self.assertEqual(second['previous_response_id'],'r2');self.assertEqual([m['content'] for m in second['input']],['B','C'])
         self.accepted('s2','r2');self.completed('r2',steered=True);self.created('r3','r2');self.completed('r3')
         result=self.c.finish(pid);self.assertEqual(result['result']['stopReason'],'end_turn');self.assertEqual(self.receipts(),[('a','incorporated',1),('b','incorporated',1),('c','incorporated',1)])
-        with sqlite3.connect(self.home/'history.sqlite3') as db:items=json.loads(db.execute('SELECT items FROM sessions').fetchone()[0])
+        with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:items=json.loads(db.execute('SELECT items FROM sessions').fetchone()[0])
         self.assertEqual([i['content'] for i in items if i.get('role')=='user'],['Do the original work','A','B','C'])
     def test_input_during_approval_does_not_cancel_or_repeat_effect(self):
         pid=self.start();call={'type':'function_call','call_id':'write-once','name':'workspace_write','arguments':json.dumps({'path':'proof.txt','content':'one effect'})};self.completed('r1',[call])
@@ -151,10 +152,10 @@ class Tests(unittest.TestCase):
         receipt=loaded['result']['_meta']['io.github.bkrabach.agent-runtime']['inputReceipts'][0]
         self.assertEqual(receipt['state'],'unknown');self.assertEqual(receipt['steeringId'],'s1');self.assertEqual(receipt['responseId'],'r1')
         self.assertTrue(self.server.connection.empty());self.assertTrue(self.server.frames.empty())
-        with sqlite3.connect(self.home/'history.sqlite3') as db:
+        with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:
             self.assertIn('retain this input',db.execute('SELECT item FROM turn_inputs').fetchone()[0])
         self.c.call('session/delete',{'sessionId':self.sid})
-        with sqlite3.connect(self.home/'history.sqlite3') as db:self.assertEqual(db.execute('SELECT count(*) FROM turn_inputs').fetchone()[0],0)
+        with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:self.assertEqual(db.execute('SELECT count(*) FROM turn_inputs').fetchone()[0],0)
     def test_rejection_is_visible_and_input_is_retained(self):
         pid=self.start();self.steer('change','x');self.frame();self.accepted('s1','r1');self.event('response.steer.failed',steer={'id':'s1','previous_response_id':'r1','input':'change'},error={'code':'steering_not_supported','message':'PRIVATE-error-body'})
         result=self.c.finish(pid);self.assertIn('error',result);self.assertNotIn('PRIVATE-error-body',json.dumps(result));self.assertEqual(self.receipts()[0][1],'notAccepted')
