@@ -113,6 +113,7 @@ impl Client {
                 context_limit: provider_context_limit,
                 fixed_bytes: 0,
                 inline_inputs: vec![],
+                messages: super::identity::Messages::default(),
                 seen_created: HashMap::new(),
                 seen_completed: HashMap::new(),
                 seen_accepted: HashMap::new(),
@@ -143,6 +144,7 @@ struct Pending {
     remote_id: Option<String>,
 }
 struct Driver {
+    messages: super::identity::Messages,
     socket: Socket,
     requests: mpsc::Receiver<Request>,
     peer: Peer,
@@ -308,6 +310,7 @@ impl Driver {
                     return Ok(());
                 }
                 self.seen_created.insert(id.clone(), parent);
+                self.messages = super::identity::Messages::default();
                 self.created += 1;
                 ensure!(
                     self.created <= self.max,
@@ -412,9 +415,14 @@ impl Driver {
                     .await?;
                 bail!("Model rejected steering; input retained, not retried automatically")
             }
+            "response.output_item.added" | "response.output_item.done" => {
+                self.messages.observe(&event);
+            }
             "response.output_text.delta" | "response.refusal.delta" => {
                 if let Some(text) = event["delta"].as_str() {
-                    self.peer.update(&self.inbox.sid,json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":text}})).await?;
+                    self.peer
+                        .update(&self.inbox.sid, self.messages.chunk(&event, text))
+                        .await?;
                 }
             }
             "response.completed" | "response.incomplete" => {
@@ -431,6 +439,7 @@ impl Driver {
                     return Ok(());
                 }
                 self.seen_completed.insert(id, response.clone());
+                self.messages.finish(&mut response);
                 ensure!(
                     response["id"].as_str() == self.id.as_deref(),
                     "Unexpected response completion"
