@@ -1,4 +1,5 @@
 mod history;
+mod identity;
 mod stream;
 mod websocket;
 
@@ -302,9 +303,10 @@ impl Provider {
         let sid = inbox.sid.clone();
         let sid = sid.as_str();
         let p = &self.config.provider;
+        let mut messages = identity::Messages::default();
         if p.kind == ProviderKind::GithubCopilot {
             inbox.state(&self.boundary_inputs, "submitted", None)?;
-            let response = crate::copilot::complete(
+            let mut response = crate::copilot::complete(
                 &self.config,
                 self.key
                     .as_deref()
@@ -318,19 +320,27 @@ impl Provider {
             for item in response["output"].as_array().unwrap() {
                 if let Some(content) = item["content"].as_array() {
                     for part in content {
-                        peer.update(sid,json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":part["text"]}})).await?;
+                        peer.update(
+                            sid,
+                            messages.chunk(
+                                &json!({"item_id":item["id"]}),
+                                part["text"].as_str().unwrap_or(""),
+                            ),
+                        )
+                        .await?;
                     }
                 }
             }
+            messages.finish(&mut response);
             return Ok(response);
         }
         if p.kind == ProviderKind::Mock {
             let text=p.mock_response.as_deref().unwrap_or("Mock response: this is a deterministic test provider; no model or tools were called.");
             ensure!(!cancel.is_cancelled(), "Cancelled");
-            peer.update(sid,json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":text}})).await?;
-            return Ok(
-                json!({"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]}],"usage":{"mock":true}}),
-            );
+            peer.update(sid, messages.chunk(&json!({}), text)).await?;
+            let mut response = json!({"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]}],"usage":{"mock":true}});
+            messages.finish(&mut response);
+            return Ok(response);
         }
         let (url, body) = self.request(instructions, items, tools)?;
         if p.kind == ProviderKind::Openai {
@@ -359,28 +369,37 @@ impl Provider {
             let Some(chunk) = next else { break };
             for data in frames.feed(&chunk.context("Model stream interrupted")?, ndjson)? {
                 if data == "[DONE]" {
-                    return collector.finish();
+                    let mut response = collector.finish()?;
+                    messages.finish(&mut response);
+                    return Ok(response);
                 }
                 let event: Value =
                     serde_json::from_str(&data).context("Invalid model stream event")?;
-                for text in collector.event(event)? {
+                messages.observe(&event);
+                for text in collector.event(event.clone())? {
                     if !text.is_empty() {
-                        peer.update(sid,json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":text}})).await?;
+                        peer.update(sid, messages.chunk(&event, &text)).await?;
                     }
                 }
                 if collector.terminal() {
-                    return collector.finish();
+                    let mut response = collector.finish()?;
+                    messages.finish(&mut response);
+                    return Ok(response);
                 }
             }
         }
         for data in frames.finish(ndjson)? {
             if data != "[DONE]" {
-                for text in collector.event(serde_json::from_str(&data)?)? {
-                    peer.update(sid,json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":text}})).await?;
+                let event: Value = serde_json::from_str(&data)?;
+                messages.observe(&event);
+                for text in collector.event(event.clone())? {
+                    peer.update(sid, messages.chunk(&event, &text)).await?;
                 }
             }
         }
-        collector.finish()
+        let mut response = collector.finish()?;
+        messages.finish(&mut response);
+        Ok(response)
     }
 }
 

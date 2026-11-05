@@ -43,6 +43,26 @@ class Tests(unittest.TestCase):
     def reconfigure(self, **limits):
         self.c.close();p=self.home/'runtime.json';cfg=json.loads(p.read_text());cfg['limits'].update(limits);cfg['context']['auto_compact']=False;p.write_text(json.dumps(cfg))
         self.c=protocol.Client(self.home);self.c.call('initialize',{'protocolVersion':1,'clientCapabilities':{}});self.c.call('session/load',{'sessionId':self.sid,'cwd':str(self.work),'mcpServers':[]})
+    def test_revised_answers_have_distinct_live_and_replayed_message_ids(self):
+        pid=self.start()
+        old='{"decision":"speak","text":"Old answer","reason":"before update"}'
+        new='{"decision":"pass","reason":"peer finished it"}'
+        self.event('response.output_item.added',item={'id':'old-item','type':'message','role':'assistant','phase':'final_answer'})
+        self.event('response.output_text.delta',item_id='old-item',delta=old)
+        self.steer('Peer has finished it','peer-finished');self.frame();self.accepted('s1','r1')
+        self.completed('r1',[{'id':'old-item','type':'message','role':'assistant','phase':'final_answer','content':[{'type':'output_text','text':old}]}],steered=True)
+        self.created('r2','r1')
+        self.event('response.output_item.added',item={'id':'new-item','type':'message','role':'assistant','phase':'final_answer'})
+        self.event('response.output_text.delta',item_id='new-item',delta=new)
+        self.completed('r2',[{'id':'new-item','type':'message','role':'assistant','phase':'final_answer','content':[{'type':'output_text','text':new}]}])
+        self.assertEqual(self.c.finish(pid)['result']['stopReason'],'end_turn')
+        chunks=[u['params']['update'] for u in self.c.updates if u.get('params',{}).get('update',{}).get('sessionUpdate')=='agent_message_chunk' and u['params']['update'].get('content',{}).get('text')]
+        self.assertEqual([(u['messageId'],u['content']['text']) for u in chunks],[('old-item',old),('new-item',new)])
+        self.c.updates=[]
+        self.c.call('session/load',{'sessionId':self.sid,'cwd':str(self.work),'mcpServers':[]})
+        replay=[u['params']['update'] for u in self.c.updates if u.get('params',{}).get('update',{}).get('sessionUpdate')=='agent_message_chunk']
+        self.assertEqual([(u['messageId'],u['content']['text']) for u in replay],[('old-item',old),('new-item',new)])
+
     def test_duplicate_response_identity_does_not_consume_budget(self):
         self.reconfigure(max_model_calls=1)
         pid=self.start();self.created('r1');self.completed('r1')

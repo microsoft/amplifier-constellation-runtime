@@ -538,6 +538,19 @@ pub fn updates(item: &Value, replay_text: bool) -> Result<Vec<Value>> {
             }
         }
     }
+    if let Some(id) = item["_acp_message_id"]
+        .as_str()
+        .or_else(|| item["id"].as_str())
+    {
+        for update in &mut out {
+            if update["sessionUpdate"] == "agent_message_chunk" {
+                update["messageId"] = id.into();
+                if let Some(phase @ ("commentary" | "final_answer")) = item["phase"].as_str() {
+                    update["_meta"]["com.microsoft.amplifier.message"]["phase"] = phase.into();
+                }
+            }
+        }
+    }
     Ok(out)
 }
 fn collect_files(v: &Value, out: &mut Vec<Value>) {
