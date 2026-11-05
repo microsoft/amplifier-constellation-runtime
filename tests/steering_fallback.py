@@ -50,7 +50,7 @@ class Tests(providers.Tests):
             self.assertEqual(self.prompt(c,sid,'What is 2 plus 2?')['result']['stopReason'],'end_turn')
             self.assertEqual(len(self.server.case['requests']),3)
             self.assertNotIn(marker,json.dumps(self.server.case['requests'][2][1]))
-            self.assertEqual((self.work/'provider-proof.txt').read_text(),providers.ARGS['content'])
+            self.assertEqual((self.work/'provider-proof.txt').read_text(encoding='utf-8'),providers.ARGS['content'])
             with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:
                 self.assertEqual(db.execute("SELECT state,recorded,reconciled FROM turn_inputs WHERE input_id='uncertain'").fetchone(),('unknown',0,1))
         finally:
@@ -71,7 +71,7 @@ class Tests(providers.Tests):
                 self.server.case['stall']=False;release.set()
                 self.assertEqual(c.finish(pid,approve=True)['result']['stopReason'],'end_turn')
                 requests=self.server.case['requests'];self.assertEqual(len(requests),2)
-                self.assertEqual((self.work/'provider-proof.txt').read_text(),providers.ARGS['content'])
+                self.assertEqual((self.work/'provider-proof.txt').read_text(encoding='utf-8'),providers.ARGS['content'])
                 wire=json.dumps(requests[1][1]);self.assertLess(wire.index('first-update'),wire.index('second-update'))
                 if kind=='anthropic':
                     blocks=requests[1][1]['messages'][2]['content'];self.assertEqual(blocks[0]['type'],'tool_result')
