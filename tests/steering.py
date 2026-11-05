@@ -87,16 +87,21 @@ class Tests(unittest.TestCase):
             if v.get('params',{}).get('update',{}).get('_meta',{}).get('io.github.bkrabach.agent-runtime',{}).get('inputReceipt',{}).get('state')=='notAccepted':break
         self.assertTrue(self.server.frames.empty());self.completed('r1')
         self.assertEqual(self.c.finish(pid)['result']['stopReason'],'end_turn');self.assertEqual(self.receipts()[0][1],'notAccepted')
-    def test_successor_disconnect_requires_explicit_reconciliation(self):
+    def test_successor_disconnect_quarantines_old_input_without_blocking_new_work(self):
         pid=self.start();self.steer('Important correction','correction');self.frame();self.accepted('s1','r1');self.completed('r1',steered=True);self.created('r2','r1')
         while True:
             v=self.c.q.get(timeout=10)
             if v.get('params',{}).get('update',{}).get('_meta',{}).get('io.github.bkrabach.agent-runtime',{}).get('inputReceipt',{}).get('state')=='incorporated':break
         self.wire.connection.shutdown(socket.SHUT_RDWR);self.wire.connection.close();self.assertIn('error',self.c.finish(pid))
         self.assertEqual(self.receipts(),[('correction','incorporated',0)])
-        response=self.c.call('session/prompt',{'sessionId':self.sid,'prompt':[{'type':'text','text':'Continue'}]})
-        self.assertEqual(response['error']['code'],-32010);self.assertTrue(self.server.connection.empty())
+        next_prompt=self.c.request('session/prompt',{'sessionId':self.sid,'prompt':[{'type':'text','text':'A new independent question'}]})
+        self.wire=self.server.connection.get(timeout=10);request=self.frame()
+        self.assertNotIn('Important correction',json.dumps(request['input']))
+        self.assertIn('Do the original work',json.dumps(request['input']))
+        self.assertIn('quarantined',request['instructions']);self.assertIn('correction',request['instructions'])
+        self.created('fresh');self.completed('fresh');self.assertEqual(self.c.finish(next_prompt)['result']['stopReason'],'end_turn')
         receipts=self.c.call('_session/input_receipts',{'sessionId':self.sid})['result']['inputReceipts'];self.assertEqual(receipts[0]['prompt'][0]['text'],'Important correction')
+        self.assertFalse(receipts[0]['reconciled']);self.assertEqual(receipts[0]['state'],'incorporated')
         other=self.c.call('session/new',{'cwd':str(self.work),'mcpServers':[]})['result']['sessionId']
         bad=self.c.call('_session/acknowledge_inputs',{'sessionId':other,'inputIds':['correction'],'disposition':'proceed_without_replay'});self.assertIn('error',bad)
         ack=self.c.call('_session/acknowledge_inputs',{'sessionId':self.sid,'inputIds':['correction'],'disposition':'proceed_without_replay'})
@@ -134,6 +139,48 @@ class Tests(unittest.TestCase):
         next=self.frame();self.assertEqual(next['type'],'response.create');self.assertEqual(next['previous_response_id'],'r1');self.assertEqual([i['type'] for i in next['input']],['function_call_output']);self.assertEqual(next['input'][0]['call_id'],'write-once')
         self.created('r2','r1');self.completed('r2');result=self.c.finish(pid)
         self.assertEqual(result['result']['stopReason'],'end_turn');self.assertEqual((self.work/'proof.txt').read_text(),'one effect');self.assertFalse(any(u.get('method')=='$/cancel_request' for u in self.c.updates))
+    def test_refreshed_context_during_pending_steering_keeps_tool_result_chain(self):
+        def snapshot(text):
+            return {'type':'text','text':text,'_meta':{'com.microsoft.amplifier.context-snapshot':{'version':1,'key':'room','retainedText':'Earlier room observation'}}}
+        pid=self.c.request('session/prompt',{'sessionId':self.sid,'prompt':[snapshot('Original room; do the requested work')]})
+        self.wire=self.server.connection.get(timeout=10);self.frame();self.created('r1')
+        self.c.call('_session/steering',{'sessionId':self.sid,'prompt':[snapshot('Updated room; keep doing the requested work')],'_meta':{'steering':{'inputId':'updated-room'}}})
+        self.frame();self.accepted('s1','r1');self.completed('r1',steered=True);self.created('r2','r1')
+        call={'type':'function_call','call_id':'write-once','name':'workspace_write','arguments':json.dumps({'path':'proof.txt','content':'one effect'})}
+        self.completed('r2',[call])
+        while True:
+            msg=self.c.q.get(timeout=10)
+            if msg.get('method')=='session/request_permission':break
+            self.c.updates.append(msg)
+        self.steer('Reaction awareness is additional evidence, not a new task','reaction')
+        self.frame();self.accepted('s2','r2')
+        self.event('response.steer.pending',steer={'id':'s2','previous_response_id':'r2'},reason='waiting_for_required_input',required_input=[{'type':'function_call_output','call_id':'write-once'}])
+        self.c.send({'jsonrpc':'2.0','id':msg['id'],'result':{'outcome':{'outcome':'selected','optionId':'allow_once'}}})
+        try: continuation=self.server.frames.get(timeout=2)
+        except queue.Empty: self.fail(f'No continuation: {self.c.finish(pid)}')
+        self.assertEqual(continuation['type'],'response.create')
+        self.assertEqual(continuation['previous_response_id'],'r2')
+        self.assertEqual([i['type'] for i in continuation['input']],['function_call_output'])
+        self.assertEqual(continuation['input'][0]['call_id'],'write-once')
+        self.created('r3','r2');self.completed('r3')
+        self.assertEqual(self.c.finish(pid)['result']['stopReason'],'end_turn')
+        self.assertEqual((self.work/'proof.txt').read_text(),'one effect')
+        self.assertEqual(self.receipts(),[('updated-room','incorporated',1),('reaction','incorporated',1)])
+    def test_compaction_during_pending_steering_preserves_the_same_tool_result_chain(self):
+        self.c.close()
+        cfg=json.loads((self.home/'runtime.json').read_text());cfg['limits']['max_context_bytes']=32000;cfg['context']['retain_recent_turns']=1
+        (self.home/'runtime.json').write_text(json.dumps(cfg))
+        items=[]
+        for i in range(20):
+            items.extend([{'role':'user','content':f'Historical request {i}: '+('old evidence '*800)}, {'role':'assistant','content':f'Historical result {i}'}])
+        with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:
+            db.execute('UPDATE sessions SET items=? WHERE id=?',(json.dumps(items),self.sid));db.commit()
+        self.c=protocol.Client(self.home);self.c.call('initialize',{'protocolVersion':1,'clientCapabilities':{}})
+        self.c.call('session/load',{'sessionId':self.sid,'cwd':str(self.work),'mcpServers':[]})
+        self.test_refreshed_context_during_pending_steering_keeps_tool_result_chain()
+        with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:
+            checkpoints=[json.loads(row[0]) for row in db.execute("SELECT data FROM events WHERE kind='context.compacted'")]
+        self.assertGreaterEqual(len({v['prefix_items'] for v in checkpoints}),2)
     def test_input_during_explicit_create_waits_for_new_response_identity(self):
         pid=self.start()
         call={'type':'function_call','call_id':'write-once','name':'workspace_write','arguments':json.dumps({'path':'proof.txt','content':'one effect'})}
@@ -179,6 +226,10 @@ class Tests(unittest.TestCase):
     def test_rejection_is_visible_and_input_is_retained(self):
         pid=self.start();self.steer('change','x');self.frame();self.accepted('s1','r1');self.event('response.steer.failed',steer={'id':'s1','previous_response_id':'r1','input':'change'},error={'code':'steering_not_supported','message':'PRIVATE-error-body'})
         result=self.c.finish(pid);self.assertIn('error',result);self.assertNotIn('PRIVATE-error-body',json.dumps(result));self.assertEqual(self.receipts()[0][1],'notAccepted')
+        with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:
+            failures=[json.loads(row[0]) for row in db.execute("SELECT data FROM events WHERE kind='model.failed'")]
+        self.assertEqual(len(failures),1);self.assertEqual(failures[0]['stage'],'event');self.assertEqual(failures[0]['category'],'provider')
+        self.assertNotIn('PRIVATE-error-body',json.dumps(failures));self.assertNotIn('change',json.dumps(failures))
     def test_lost_ack_is_unknown_without_replay(self):
         pid=self.start();self.steer('change','x');self.frame();self.wire.connection.shutdown(socket.SHUT_RDWR);self.wire.connection.close()
         result=self.c.finish(pid);self.assertIn('error',result);self.assertEqual(self.receipts()[0][1],'unknown');self.assertTrue(self.server.frames.empty())

@@ -10,14 +10,6 @@ use serde_json::{Value, json};
 use std::sync::Mutex;
 use tokio::sync::Notify;
 
-#[derive(Debug)]
-pub struct RecoveryRequired;
-impl std::fmt::Display for RecoveryRequired {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Previous input outcome requires review. Inspect _session/input_receipts and acknowledge proceeding without replay via _session/acknowledge_inputs, or start a new session. No work was replayed.")
-    }
-}
-impl std::error::Error for RecoveryRequired {}
 pub const META: &str = "io.github.bkrabach.agent-runtime";
 pub struct Inbox {
     pub store: Store,

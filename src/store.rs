@@ -306,12 +306,16 @@ impl Store {
         let rows=q.query_map([sid],|r|Ok(json!({"inputId":r.get::<_,String>(0)?,"turnId":r.get::<_,String>(1)?,"sequence":r.get::<_,i64>(2)?,"state":r.get::<_,String>(3)?,"recorded":r.get::<_,bool>(4)?,"reason":r.get::<_,Option<String>>(5)?,"responseId":r.get::<_,Option<String>>(6)?,"steeringId":r.get::<_,Option<String>>(7)?,"successorId":r.get::<_,Option<String>>(8)?,"reconciled":r.get::<_,bool>(9)?,"prompt":serde_json::from_str::<Value>(&r.get::<_,String>(10)?).unwrap_or(Value::Null)["_acp_prompt"]})))?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(json!(rows))
     }
-    pub fn ensure_inputs_resolved(&self, sid: &str) -> Result<()> {
-        let count:i64=self.db()?.query_row("SELECT count(*) FROM turn_inputs WHERE session=?1 AND reconciled=0 AND (state='unknown' OR (state='incorporated' AND recorded=0))",[sid],|r|r.get(0))?;
-        if count != 0 {
-            return Err(crate::steering::RecoveryRequired.into());
-        }
-        Ok(())
+    /// Bounded metadata for the next independent request. The uncertain source
+    /// text stays quarantined; it is never silently inserted as a fresh prompt.
+    pub fn input_uncertainty(&self, sid: &str) -> Result<Value> {
+        let db = self.db()?;
+        let count:i64=db.query_row("SELECT count(*) FROM turn_inputs WHERE session=?1 AND reconciled=0 AND (state='unknown' OR (state='incorporated' AND recorded=0))",[sid],|r|r.get(0))?;
+        let mut q=db.prepare("SELECT input_id,state,recorded FROM turn_inputs WHERE session=?1 AND reconciled=0 AND (state='unknown' OR (state='incorporated' AND recorded=0)) ORDER BY sequence DESC LIMIT 8")?;
+        let items=q.query_map([sid],|r|Ok(json!({"inputId":r.get::<_,String>(0)?,"state":r.get::<_,String>(1)?,"recorded":r.get::<_,bool>(2)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(
+            json!({"count":count,"items":items,"complete":count<=8,"disposition":"quarantined_without_replay"}),
+        )
     }
     pub fn acknowledge_inputs(&self, sid: &str, ids: &[String]) -> Result<()> {
         ensure!(

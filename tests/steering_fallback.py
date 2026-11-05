@@ -40,7 +40,11 @@ class Tests(providers.Tests):
             self.server.case['stall']=False;release.set();self.assertIn('error',c.finish(pid,approve=True))
             self.assertEqual(len(self.server.case['requests']),2)
             self.assertIn(marker,json.dumps(self.server.case['requests'][1][1]))
-            self.assertEqual(self.prompt(c,sid,'Unrelated new question')['error']['code'],-32010)
+            self.assertEqual(self.prompt(c,sid,'Unrelated new question')['result']['stopReason'],'end_turn')
+            self.assertEqual(len(self.server.case['requests']),3)
+            self.assertNotIn(marker,json.dumps(self.server.case['requests'][2][1]))
+            self.assertIn('quarantined',self.server.case['requests'][2][1]['system'])
+            self.assertIn('uncertain',self.server.case['requests'][2][1]['system'])
             ack=c.call('_session/acknowledge_inputs',{'sessionId':sid,'inputIds':['uncertain'],'disposition':'proceed_without_replay'})
             receipt=ack['result']['inputReceipts'][0]
             self.assertTrue(receipt['reconciled']);self.assertEqual(receipt['state'],'unknown')
@@ -48,8 +52,8 @@ class Tests(providers.Tests):
             # Reconnect to prove the exclusion survives durable recovery.
             self.close(c);c=self.client();c.call('session/load',{'sessionId':sid,'cwd':str(self.work),'mcpServers':[]})
             self.assertEqual(self.prompt(c,sid,'What is 2 plus 2?')['result']['stopReason'],'end_turn')
-            self.assertEqual(len(self.server.case['requests']),3)
-            self.assertNotIn(marker,json.dumps(self.server.case['requests'][2][1]))
+            self.assertEqual(len(self.server.case['requests']),4)
+            self.assertNotIn(marker,json.dumps(self.server.case['requests'][3][1]))
             self.assertEqual((self.work/'provider-proof.txt').read_text(encoding='utf-8'),providers.ARGS['content'])
             with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:
                 self.assertEqual(db.execute("SELECT state,recorded,reconciled FROM turn_inputs WHERE input_id='uncertain'").fetchone(),('unknown',0,1))

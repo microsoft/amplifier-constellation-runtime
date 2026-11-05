@@ -6,6 +6,41 @@ use std::{
 };
 
 #[test]
+fn uncertainty_is_bounded_metadata_without_replaying_or_acknowledging_source_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().to_owned()).unwrap();
+    let session = store.create(dir.path().to_owned(), Mode::ReadOnly).unwrap();
+    let inbox = Inbox::new(store.clone(), &session.id).unwrap();
+    for index in 0..12 {
+        inbox
+            .admit(
+                &format!("input-{index}"),
+                json!({"role":"user","content":"PRIVATE-uncertain-request"}),
+            )
+            .unwrap();
+    }
+    inbox
+        .state(&inbox.queued().unwrap(), "submitted", None)
+        .unwrap();
+    inbox.close("disconnected").unwrap();
+    let summary = store.input_uncertainty(&session.id).unwrap();
+    assert_eq!(summary["count"], 12);
+    assert_eq!(summary["items"].as_array().unwrap().len(), 8);
+    assert_eq!(summary["complete"], false);
+    assert!(!summary.to_string().contains("PRIVATE-uncertain-request"));
+    assert!(store.load(&session.id).unwrap().items.is_empty());
+    assert!(
+        store
+            .input_receipts(&session.id)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["state"] == "unknown" && r["reconciled"] == false)
+    );
+}
+
+#[test]
 fn concurrent_history_and_receipts_finish_and_survive_reopening() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path().to_owned()).unwrap();

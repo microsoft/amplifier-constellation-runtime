@@ -19,6 +19,9 @@ pub struct Provider {
     key: Option<String>,
     websocket: Option<websocket::Client>,
     pub(crate) boundary_inputs: Vec<crate::steering::Input>,
+    /// Local observations produced since the last provider response. These are
+    /// separate from the refreshed/compacted projection of earlier history.
+    pub(crate) continuation_items: Vec<Value>,
 }
 impl Provider {
     pub fn new(config: &Config) -> Result<Self> {
@@ -70,6 +73,7 @@ impl Provider {
             key,
             websocket: None,
             boundary_inputs: vec![],
+            continuation_items: vec![],
         })
     }
     async fn headers(
@@ -279,6 +283,12 @@ impl Provider {
         let mut result = self
             .complete_inner(instructions, items, tools, peer, cancel, inbox.clone())
             .await;
+        if result.is_err()
+            && (self.config.provider.kind != ProviderKind::Openai || self.websocket.is_none())
+        {
+            let _ = inbox.store.event(&inbox.sid, Some(&inbox.turn), "model.failed",
+                json!({"stage":"provider_request","category":"provider_or_transport","code":"request_failed"}));
+        }
         if let Ok(response) = &mut result
             && !self.boundary_inputs.is_empty()
         {
@@ -349,7 +359,12 @@ impl Provider {
                     websocket::Client::start(self, peer.clone(), inbox, cancel.clone()).await?,
                 );
             }
-            return self.websocket.as_mut().unwrap().complete(body).await;
+            return self
+                .websocket
+                .as_mut()
+                .unwrap()
+                .complete(body, std::mem::take(&mut self.continuation_items))
+                .await;
         }
         let request = self.headers(self.client.post(url)).await?.json(&body);
         inbox.state(&self.boundary_inputs, "submitted", None)?;
