@@ -259,8 +259,11 @@ Receipts and original input remain attached to that session. Loading a session
 returns bounded receipt metadata. `_session/input_receipts` requires a loaded
 session and returns retained input blocks plus receipt/remote IDs; it is not a
 cross-conversation lookup. Uncertain prior submissions, or a successor whose
-input was committed but whose complete history was not saved, block another
-prompt with JSON-RPC error `-32010`. A client must surface that condition.
+input was committed but whose complete history was not saved, remain quarantined
+without replay. They do not block a genuinely new prompt. The model receives a
+bounded metadata notice with receipt IDs and states, telling it to inspect effects
+before related actions. Uncertain input text is not inserted into the new request,
+and proceeding does not mark the old outcome known or acknowledged.
 
 After inspecting the receipt and real effects, an authorized client can call
 `_session/acknowledge_inputs` with that loaded `sessionId`, explicit `inputIds`,
@@ -276,3 +279,11 @@ Created/completed/acceptance events are idempotent by identity; conflicting
 duplicates fail visibly. A final receipt can say `notAccepted` when the original
 turn's capacity expires. Neither that result nor `unknown` authorizes an automatic
 retry.
+
+An active Responses chain and its compacted/refreshed local history view are
+different things. If accepted steering is still waiting for a tool result, the
+runtime continues the existing chain with the engine's new local observations
+only. It defers any changed history projection until that steering is settled,
+without repeating earlier input or tool calls. The configured context budget
+still applies. `model.failed` records bounded failure stage/category and chain
+state without retaining provider error bodies, source text, or credentials.

@@ -23,6 +23,7 @@ type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 struct Request {
     body: Value,
+    continuation_items: Vec<Value>,
     reply: oneshot::Sender<Result<Value>>,
 }
 pub struct Client {
@@ -117,8 +118,20 @@ impl Client {
                 seen_created: HashMap::new(),
                 seen_completed: HashMap::new(),
                 seen_accepted: HashMap::new(),
+                failure_stage: "connect",
+                failure_category: "transport",
             };
             if let Err(e) = driver.run().await {
+                // Provider bodies, source text, URLs and credentials never enter
+                // failure telemetry. Record where the chain stopped, even if
+                // it failed between engine requests while a tool was running.
+                let _ = inbox.store.event(&inbox.sid, Some(&inbox.turn), "model.failed", json!({
+                    "stage":driver.failure_stage,"category":driver.failure_category,
+                    "response_id":driver.id,"pending_inputs":driver.pending.as_ref().map_or(0,|p|p.inputs.len()),
+                    "steering_accepted":driver.pending.as_ref().is_some_and(|p|p.remote_id.is_some()),
+                    "awaiting_created":driver.awaiting_created,"needs_tools":driver.needs_tools,
+                    "code":failure_code(&e),
+                }));
                 let _ = inbox.close("transport_or_provider_failure");
                 let _ = inbox.publish_summary(&driver.peer).await;
                 if let Some(reply) = driver.waiter.take() {
@@ -128,12 +141,16 @@ impl Client {
         });
         Ok(Self { requests: tx, task })
     }
-    pub async fn complete(&mut self, body: Value) -> Result<Value> {
+    pub async fn complete(&mut self, body: Value, continuation_items: Vec<Value>) -> Result<Value> {
         let (tx, rx) = oneshot::channel();
         self.requests
-            .send(Request { body, reply: tx })
+            .send(Request {
+                body,
+                continuation_items,
+                reply: tx,
+            })
             .await
-            .context("Model WebSocket closed; saved input receipts require reconciliation")?;
+            .context("Model WebSocket closed; saved input receipts remain available for review")?;
         rx.await
             .context("Model WebSocket interrupted; no response or tool was replayed")?
     }
@@ -144,6 +161,8 @@ struct Pending {
     remote_id: Option<String>,
 }
 struct Driver {
+    failure_stage: &'static str,
+    failure_category: &'static str,
     messages: super::identity::Messages,
     socket: Socket,
     requests: mpsc::Receiver<Request>,
@@ -169,6 +188,26 @@ struct Driver {
     seen_created: HashMap<String, Option<String>>,
     seen_completed: HashMap<String, Value>,
     seen_accepted: HashMap<String, String>,
+}
+fn failure_code(error: &anyhow::Error) -> &'static str {
+    match error.to_string().as_str() {
+        "Active model chain reached its context budget while steering is pending; no work was replayed" => {
+            "pending_context_capacity"
+        }
+        "Only one engine response request may be outstanding" => "overlapping_response_requests",
+        "Unexpected response completion" | "Unexpected steering successor" => {
+            "response_identity_mismatch"
+        }
+        "Successor arrived without steering acknowledgment; input outcome is unknown" => {
+            "missing_steering_acknowledgment"
+        }
+        "Model WebSocket reported failure; check model, quota and supported settings; no work was replayed" => {
+            "provider_reported_failure"
+        }
+        "Model WebSocket closed; no pending input was replayed" => "connection_closed",
+        "Logical turn model-call budget exhausted" => "model_call_budget",
+        _ => "request_failed",
+    }
 }
 impl Driver {
     async fn send(&mut self, value: Value) -> Result<()> {
@@ -274,11 +313,36 @@ impl Driver {
             if all.starts_with(&self.history) {
                 body["previous_response_id"] = json!(id);
                 body["input"] = json!(&all[self.history.len()..]);
-            } else {
-                ensure!(
-                    self.pending.is_none(),
-                    "Cannot compact or reset a chain with unresolved steering"
+            } else if self.pending.is_some() {
+                // Refreshed source snapshots and compaction can change an old
+                // prefix without changing the active work. Finish the existing
+                // chain with only the engine's new local observations; never
+                // replay its input, assistant output, or completed tool calls.
+                let observations = history::responses(&request.continuation_items);
+                all = self.history.clone();
+                all.extend(observations.iter().cloned());
+                let pending = history::responses(
+                    &self
+                        .pending
+                        .as_ref()
+                        .unwrap()
+                        .inputs
+                        .iter()
+                        .map(|input| input.item.clone())
+                        .collect::<Vec<_>>(),
                 );
+                ensure!(
+                    serde_json::to_vec(&all)?.len()
+                        + serde_json::to_vec(&pending)?.len()
+                        + self.fixed_bytes
+                        <= self.context_limit,
+                    "Active model chain reached its context budget while steering is pending; no work was replayed"
+                );
+                body["previous_response_id"] = json!(id);
+                body["input"] = json!(observations);
+                self.inbox.store.event(&self.inbox.sid, Some(&self.inbox.turn),
+                    "context.refresh.deferred", json!({"reason":"pending_steering","local_observations":request.continuation_items.len()}))?;
+            } else {
                 // A local compaction checkpoint starts a settled chain with full input.
                 self.id = None;
             }
@@ -488,14 +552,14 @@ impl Driver {
             tokio::select! {
              biased;
              _=self.cancel.cancelled()=>{let _=self.socket.close(None).await;return Ok(())},
-             request=self.requests.recv()=>{let Some(request)=request else {return Ok(())};self.request(request).await?;},
-             event=self.socket.next()=>{match event.context("Model WebSocket closed before work settled")?.context("Model WebSocket interrupted")? {
-              Message::Text(text)=>{self.total_bytes+=text.len();ensure!(self.total_bytes<=128*1024*1024,"Logical turn model stream exceeded byte budget");self.event(serde_json::from_str(&text).context("Invalid model WebSocket event")?).await?;},
+             request=self.requests.recv()=>{let Some(request)=request else {return Ok(())};self.failure_stage="request";self.failure_category="runtime_boundary";self.request(request).await?;},
+             event=self.socket.next()=>{self.failure_stage="receive";self.failure_category="transport";match event.context("Model WebSocket closed before work settled")?.context("Model WebSocket interrupted")? {
+              Message::Text(text)=>{self.total_bytes+=text.len();ensure!(self.total_bytes<=128*1024*1024,"Logical turn model stream exceeded byte budget");let event:Value=serde_json::from_str(&text).context("Invalid model WebSocket event")?;self.failure_stage="event";self.failure_category=if matches!(event["type"].as_str(),Some("response.failed"|"error"|"response.steer.failed")){"provider"}else{"protocol"};self.event(event).await?;},
               Message::Ping(data)=>self.socket.send(Message::Pong(data)).await?,
               Message::Close(_)=>bail!("Model WebSocket closed; no pending input was replayed"),
               Message::Binary(_)=>bail!("Unexpected binary model event"),_=>{}
              }},
-             _=self.inbox.changed.notified()=>self.steer().await?,
+             _=self.inbox.changed.notified()=>{self.failure_stage="steering";self.failure_category="input_delivery";self.steer().await?;},
             }
         }
     }

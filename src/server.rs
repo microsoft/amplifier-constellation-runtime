@@ -69,7 +69,7 @@ fn response_for(method: &str, id: Value, result: Result<Value>) -> Value {
     match result {
         Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
         Err(error) => {
-            json!({"jsonrpc":"2.0","id":id,"error":{"code":if !known(method){-32601}else{error.downcast_ref::<ProtocolError>().map_or_else(||if error.is::<crate::steering::RecoveryRequired>(){-32010}else{-32603},|e|e.code)},"message":error.to_string()}})
+            json!({"jsonrpc":"2.0","id":id,"error":{"code":if !known(method){-32601}else{error.downcast_ref::<ProtocolError>().map_or(-32603,|e|e.code)},"message":error.to_string()}})
         }
     }
 }
