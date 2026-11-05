@@ -42,6 +42,7 @@ jobs:
       - run: cargo build --locked
       - run: python tests/steering.py
       - run: python tests/steering_fallback.py
+      - run: python tests/steering_pause.py
       - run: python tests/protocol.py
       - run: python tests/images.py
       - run: python tests/providers.py

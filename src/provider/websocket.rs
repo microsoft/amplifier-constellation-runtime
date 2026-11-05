@@ -102,6 +102,7 @@ impl Client {
                 history: vec![],
                 id: None,
                 running: false,
+                awaiting_created: false,
                 auto_wait: false,
                 needs_tools: false,
                 pending: None,
@@ -152,6 +153,7 @@ struct Driver {
     history: Vec<Value>,
     id: Option<String>,
     running: bool,
+    awaiting_created: bool,
     auto_wait: bool,
     needs_tools: bool,
     pending: Option<Pending>,
@@ -189,7 +191,11 @@ impl Driver {
         Ok(true)
     }
     async fn steer(&mut self) -> Result<()> {
-        if self.pending.is_some() || self.auto_wait || self.created >= self.max {
+        if self.pending.is_some()
+            || self.auto_wait
+            || self.awaiting_created
+            || self.created >= self.max
+        {
             return Ok(());
         }
         let Some(parent) = self.id.clone() else {
@@ -280,6 +286,7 @@ impl Driver {
         body.as_object_mut().unwrap().remove("background");
         body["type"] = json!("response.create");
         self.running = true;
+        self.awaiting_created = true;
         self.needs_tools = false;
         self.send(body).await
     }
@@ -336,6 +343,7 @@ impl Driver {
                     self.inputs.append(&mut self.inline_inputs);
                 }
                 self.id = Some(id);
+                self.awaiting_created = false;
                 self.running = true;
                 self.auto_wait = false;
                 self.needs_tools = false;

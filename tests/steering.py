@@ -113,6 +113,31 @@ class Tests(unittest.TestCase):
         next=self.frame();self.assertEqual(next['type'],'response.create');self.assertEqual(next['previous_response_id'],'r1');self.assertEqual([i['type'] for i in next['input']],['function_call_output']);self.assertEqual(next['input'][0]['call_id'],'write-once')
         self.created('r2','r1');self.completed('r2');result=self.c.finish(pid)
         self.assertEqual(result['result']['stopReason'],'end_turn');self.assertEqual((self.work/'proof.txt').read_text(),'one effect');self.assertFalse(any(u.get('method')=='$/cancel_request' for u in self.c.updates))
+    def test_input_during_explicit_create_waits_for_new_response_identity(self):
+        pid=self.start()
+        call={'type':'function_call','call_id':'write-once','name':'workspace_write','arguments':json.dumps({'path':'proof.txt','content':'one effect'})}
+        self.completed('r1',[call])
+        while True:
+            msg=self.c.q.get(timeout=10)
+            if msg.get('method')=='session/request_permission':break
+            self.c.updates.append(msg)
+        self.c.send({'jsonrpc':'2.0','id':msg['id'],'result':{'outcome':{'outcome':'selected','optionId':'allow_once'}}})
+        explicit=self.frame();self.assertEqual(explicit['type'],'response.create')
+        self.assertEqual(explicit['previous_response_id'],'r1')
+        self.assertEqual([i['type'] for i in explicit['input']],['function_call_output'])
+        self.steer('Please incorporate the latest detail','new-detail')
+        # This is an absence assertion across a real network boundary: the
+        # create is on wire, but its response ID is deliberately unavailable.
+        with self.assertRaises(queue.Empty):self.server.frames.get(timeout=0.1)
+        self.created('r2','r1')
+        update=self.frame();self.assertEqual(update['type'],'response.steer')
+        self.assertEqual(update['previous_response_id'],'r2')
+        self.accepted('s1','r2');self.completed('r2',steered=True)
+        self.created('r3','r2');self.completed('r3')
+        self.assertEqual(self.c.finish(pid)['result']['stopReason'],'end_turn')
+        self.assertEqual(self.receipts(),[('new-detail','incorporated',1)])
+        self.assertEqual((self.work/'proof.txt').read_text(),'one effect')
+        self.assertTrue(self.server.frames.empty())
     def test_restart_preserves_unknown_input_without_replay(self):
         self.start();self.steer('retain this input','crash-input');self.frame();self.accepted('s1','r1')
         # Wait for the durable acceptance notification before simulating process death.
