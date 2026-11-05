@@ -30,6 +30,7 @@ impl Store {
         let db = s.db()?;
         db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,cwd TEXT NOT NULL,mode TEXT NOT NULL,title TEXT NOT NULL,updated TEXT NOT NULL,items TEXT NOT NULL); CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY AUTOINCREMENT,session TEXT NOT NULL,turn TEXT,kind TEXT NOT NULL,at TEXT NOT NULL,data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS turns(id TEXT PRIMARY KEY,session TEXT NOT NULL,state TEXT NOT NULL,started TEXT NOT NULL,finished TEXT);")?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS history_imports(session TEXT PRIMARY KEY,source TEXT NOT NULL,digest TEXT NOT NULL)")?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS turn_inputs(sequence INTEGER PRIMARY KEY AUTOINCREMENT,session TEXT NOT NULL,turn TEXT NOT NULL,input_id TEXT NOT NULL,item TEXT NOT NULL,state TEXT NOT NULL,recorded INTEGER NOT NULL DEFAULT 0,reason TEXT,remote_parent TEXT,remote_id TEXT,successor TEXT,reconciled INTEGER NOT NULL DEFAULT 0,UNIQUE(session,input_id))")?;
         // Keep the original sessions table compatible with 0.1 for rollback.
         db.execute_batch("CREATE TABLE IF NOT EXISTS session_providers(session TEXT PRIMARY KEY,provider_key TEXT NOT NULL)")?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS context_checkpoints(session TEXT NOT NULL,prefix_sha256 TEXT NOT NULL,provider_key TEXT NOT NULL,created TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(session,prefix_sha256))")?;
@@ -40,7 +41,7 @@ impl Store {
         )?;
         Ok(s)
     }
-    fn db(&self) -> Result<Connection> {
+    pub(crate) fn db(&self) -> Result<Connection> {
         let db = Connection::open(self.home.join("history.sqlite3"))?;
         db.busy_timeout(std::time::Duration::from_secs(5))?;
         Ok(db)
@@ -63,6 +64,7 @@ impl Store {
             "session_providers",
             "context_checkpoints",
             "history_imports",
+            "turn_inputs",
         ] {
             tx.execute(&format!("DELETE FROM {table} WHERE session=?1"), [sid])?;
         }
@@ -274,14 +276,69 @@ impl Store {
         )?;
         Ok(())
     }
+    /// Caller owns the session lock. Retain uncertain submissions, never replay them.
+    pub fn recover_inputs(&self, sid: &str, current: Option<&str>) -> Result<()> {
+        let mut db = self.db()?;
+        let tx = db.transaction()?;
+        tx.execute("UPDATE turn_inputs SET state='notAccepted',reason='process_interrupted' WHERE session=?1 AND turn!=COALESCE(?2,'') AND state='received'",params![sid,current])?;
+        tx.execute("UPDATE turn_inputs SET state='unknown',reason='process_interrupted' WHERE session=?1 AND turn!=COALESCE(?2,'') AND state IN ('submitted','remoteQueued')",params![sid,current])?;
+        tx.commit()?;
+        Ok(())
+    }
+    /// Metadata for authorized session owners; source content remains in the durable inbox.
+    pub fn input_receipts(&self, sid: &str) -> Result<Value> {
+        let db = self.db()?;
+        let mut q=db.prepare("SELECT input_id,turn,sequence,state,recorded,reason,remote_parent,remote_id,successor,reconciled,item FROM turn_inputs WHERE session=?1 ORDER BY reconciled,(state='unknown' OR (state='incorporated' AND recorded=0)) DESC,sequence DESC LIMIT 256")?;
+        let rows=q.query_map([sid],|r|Ok(json!({"inputId":r.get::<_,String>(0)?,"turnId":r.get::<_,String>(1)?,"sequence":r.get::<_,i64>(2)?,"state":r.get::<_,String>(3)?,"recorded":r.get::<_,bool>(4)?,"reason":r.get::<_,Option<String>>(5)?,"responseId":r.get::<_,Option<String>>(6)?,"steeringId":r.get::<_,Option<String>>(7)?,"successorId":r.get::<_,Option<String>>(8)?,"reconciled":r.get::<_,bool>(9)?,"prompt":serde_json::from_str::<Value>(&r.get::<_,String>(10)?).unwrap_or(Value::Null)["_acp_prompt"]})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(json!(rows))
+    }
+    pub fn ensure_inputs_resolved(&self, sid: &str) -> Result<()> {
+        let count:i64=self.db()?.query_row("SELECT count(*) FROM turn_inputs WHERE session=?1 AND reconciled=0 AND (state='unknown' OR (state='incorporated' AND recorded=0))",[sid],|r|r.get(0))?;
+        if count != 0 {
+            return Err(crate::steering::RecoveryRequired.into());
+        }
+        Ok(())
+    }
+    pub fn acknowledge_inputs(&self, sid: &str, ids: &[String]) -> Result<()> {
+        ensure!(
+            !ids.is_empty() && ids.len() <= 256,
+            "Supply between 1 and 256 input IDs"
+        );
+        let mut db = self.db()?;
+        let tx = db.transaction()?;
+        for id in ids {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM turn_inputs WHERE session=?1 AND input_id=?2)",
+                params![sid, id],
+                |r| r.get(0),
+            )?;
+            ensure!(exists, "Input receipt does not belong to this session");
+            tx.execute(
+                "UPDATE turn_inputs SET reconciled=1 WHERE session=?1 AND input_id=?2",
+                params![sid, id],
+            )?;
+        }
+        tx.commit()?;
+        self.event(
+            sid,
+            None,
+            "input.reconciled",
+            json!({"inputIds":ids,"disposition":"proceed_without_replay"}),
+        )?;
+        Ok(())
+    }
     pub fn begin(&self, sid: &str) -> Result<String> {
+        self.begin_id(sid, &id())
+    }
+    pub fn begin_id(&self, sid: &str, turn: &str) -> Result<String> {
+        self.recover_inputs(sid, Some(turn))?;
         // Caller holds the cross-process session lock. Earlier running turns are
         // interrupted; no tool intent is silently replayed after a crash.
         self.db()?.execute(
             "UPDATE turns SET state='interrupted',finished=?1 WHERE session=?2 AND state='running'",
             params![now(), sid],
         )?;
-        let id = id();
+        let id = turn.to_owned();
         self.db()?.execute(
             "INSERT INTO turns VALUES (?1,?2,'running',?3,NULL)",
             params![id, sid, now()],

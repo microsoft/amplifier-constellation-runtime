@@ -275,6 +275,7 @@ impl Config {
         Ok(c)
     }
     pub fn validate(&self, home: &Path) -> Result<()> {
+        crate::model_policy::validate(&self.provider)?;
         ensure!(
             self.command_network == CommandNetwork::Isolated || cfg!(target_os = "linux"),
             "Inherited command networking is currently supported on Linux only"

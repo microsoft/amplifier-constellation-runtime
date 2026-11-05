@@ -2,6 +2,12 @@
 
 Provider selection belongs inside the native Rust runtime. ACP clients, Slack adapters, browser conversations, the Agent Instance host, and the fleet manager do not need provider-specific code. This implements the common text, streaming, and function-tool loop, not every optional feature of the Amplifier Python modules.
 
+The accepted next design supports the latest verified model in each useful
+provider class, with explicit model upgrades and preserved session bindings.
+See the [model support policy](steering-design.md#model-support-policy-across-providers).
+That policy and native OpenAI WebSocket steering are not implemented yet; the
+reference below describes the released runtime.
+
 ## Available providers
 
 | Preset | Protocol | Default credential variable | Endpoint |
@@ -74,7 +80,7 @@ agent-runtime --home /absolute/path/to/agent configure-provider \
   --provider litellm --model my-proxy-route
 ```
 
-OpenAI defaults to medium reasoning. Other providers send no reasoning override by default. Anthropic `--reasoning-effort` requests adaptive thinking; `--thinking-budget-tokens` requests the older explicit-budget mode. They are alternatives, and model support differs: the live Claude 5.5 check rejected explicit-budget mode and succeeded with adaptive thinking. Gemini receives `thinkingLevel` or `thinkingBudget`; Ollama receives `think`; compatible chat APIs receive `reasoning_effort`. An unsupported model option fails visibly; the runtime does not silently change the model or account.
+OpenAI defaults to medium reasoning. Other providers send no reasoning override by default. Anthropic `--reasoning-effort` requests adaptive thinking. The current Claude classes reject the older explicit thinking-budget setting during local configuration validation. Gemini receives `thinkingLevel` or `thinkingBudget`; Ollama receives `think`; compatible chat APIs receive `reasoning_effort`. An unsupported model option fails visibly; the runtime does not silently change the model or account.
 
 `--auth auto` uses the native key header for Anthropic, Gemini, and Azure, and bearer authentication for the other HTTP providers when a key is configured. `--auth none` never reads or sends an inherited key. Azure bearer tokens must be obtained and refreshed externally; this implementation does not run Azure CLI, managed identity, or the Azure SDK credential chain. Likewise, it does not perform Google OAuth token refresh.
 
@@ -126,3 +132,25 @@ The remaining modules have different boundaries:
 - **LiteLLM** in Amplifier invokes the Python SDK directly. This runtime supports its OpenAI-compatible proxy, which can route to the operator's configured providers. It does not embed the full Python SDK or claim all of its direct integrations.
 
 Protocol references: [Anthropic streaming](https://platform.claude.com/docs/en/build-with-claude/streaming), [Gemini function calling](https://ai.google.dev/gemini-api/docs/function-calling), [Ollama chat](https://docs.ollama.com/api/chat), [Azure Responses](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/responses), and the pinned module sources above.
+
+## Current model selection
+
+`management schema` exposes a dated model catalog with a concrete current model
+for each useful class. OpenAI generation uses GPT-6 family models through Responses
+WebSockets; it does not retry over HTTP or silently select an older model. Claude
+uses Fable 5.1 and Opus, Sonnet, and Haiku 5.5 with adaptive thinking. The catalog
+also lists Gemini 4 Argon, 3.8 Flash, and 3.5 Flash-Lite. Those Gemini entries are
+documentation-verified choices, not claims of live account access. Specialist
+image, audio, and decision configurations remain independent. Azure deployment
+names, local servers, and gateways retain their own routing/capability checks.
+
+Changing a catalog does not change a saved conversation's model binding. Select
+a supported model explicitly when migrating an installation; provider changes
+start a new context under the existing migration rules. The ChatGPT subscription
+route omits unsupported output-token limits, retains the logical turn's time and
+model-call limits, and uses only connection-local response chaining.
+
+Sources: [OpenAI steering](https://developers.openai.com/api/docs/guides/steering),
+[ChatGPT route limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations),
+[Claude model overview](https://platform.claude.com/docs/en/models/overview),
+[Gemini models](https://aistudio.google.com/docs/models).

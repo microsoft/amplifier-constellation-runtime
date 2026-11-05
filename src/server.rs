@@ -21,6 +21,13 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+type ActiveTurn = (
+    Value,
+    CancellationToken,
+    CancellationToken,
+    Arc<crate::steering::Inbox>,
+);
+
 struct State {
     config: Config,
     store: Store,
@@ -28,7 +35,7 @@ struct State {
     initialized: AtomicBool,
     loaded: Mutex<HashMap<String, Loaded>>,
     client_form_elicitation: AtomicBool,
-    active: Mutex<HashMap<String, (Value, CancellationToken, CancellationToken)>>,
+    active: Mutex<HashMap<String, ActiveTurn>>,
     slots: Arc<Semaphore>,
 }
 #[derive(Clone)]
@@ -58,9 +65,18 @@ fn protocol_error(code: i64, message: impl Into<String>) -> anyhow::Error {
     }
     .into()
 }
+fn response_for(method: &str, id: Value, result: Result<Value>) -> Value {
+    match result {
+        Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
+        Err(error) => {
+            json!({"jsonrpc":"2.0","id":id,"error":{"code":if !known(method){-32601}else{error.downcast_ref::<ProtocolError>().map_or_else(||if error.is::<crate::steering::RecoveryRequired>(){-32010}else{-32603},|e|e.code)},"message":error.to_string()}})
+        }
+    }
+}
 impl Drop for Active {
     fn drop(&mut self) {
-        if let Some((_, _, done)) = self.state.active.lock().unwrap().remove(&self.id) {
+        if let Some((_, _, done, inbox)) = self.state.active.lock().unwrap().remove(&self.id) {
+            let _ = inbox.close("turn_closed");
             done.cancel();
         }
     }
@@ -116,17 +132,28 @@ pub async fn serve(config: Config, store: Store) -> Result<()> {
                 ensure!(msg["jsonrpc"]=="2.0","Expected JSON-RPC 2.0");
                 let method=msg["method"].as_str().context("Method must be a string")?;
                 if matches!(method,"session/cancel"|"$/cancel_request") {
-                    for (sid,(request,token,_)) in state.active.lock().unwrap().iter(){if (method=="session/cancel" && msg["params"]["sessionId"]==*sid) || (method=="$/cancel_request" && msg["params"]["requestId"]==*request) {token.cancel();}}
+                    for (sid,(request,token,_,_)) in state.active.lock().unwrap().iter(){if (method=="session/cancel" && msg["params"]["sessionId"]==*sid) || (method=="$/cancel_request" && msg["params"]["requestId"]==*request) {token.cancel();}}
                     if let Some(id)=msg.get("id"){peer.send(json!({"jsonrpc":"2.0","id":id,"result":{}})).await?;}continue;
                 }
                 if msg.get("id").is_none(){continue;}
                 if tasks.len()>=64 {peer.send(json!({"jsonrpc":"2.0","id":msg["id"],"error":{"code":-32000,"message":"Too many pending requests"}})).await?;continue;}
-                let state=state.clone();tasks.spawn(async move {let id=msg["id"].clone();let result=handle(state.clone(),&msg).await;let response=match result{Ok(r)=>json!({"jsonrpc":"2.0","id":id,"result":r}),Err(e)=>json!({"jsonrpc":"2.0","id":id,"error":{"code":if msg["method"].as_str().is_some_and(|m|!known(m)){-32601}else{e.downcast_ref::<ProtocolError>().map_or(-32603,|e|e.code)},"message":e.to_string()}})};let _=state.peer.send(response).await;});
+                // Admission is synchronous in frame order. Parallel prompt/model/tool
+                // work must not reorder a burst before its durable sequence is assigned.
+                if method=="_session/steering" {
+                    let result=handle(state.clone(),&msg).await;
+                    peer.send(response_for(method,msg["id"].clone(),result)).await?;
+                    continue;
+                }
+                let state=state.clone();tasks.spawn(async move {
+                    let result=handle(state.clone(),&msg).await;
+                    let response=response_for(msg["method"].as_str().unwrap(),msg["id"].clone(),result);
+                    let _=state.peer.send(response).await;
+                });
             },
             Some(_)=tasks.join_next(),if !tasks.is_empty()=>{},
         }
     }Ok::<_,anyhow::Error>(())}.await;
-    for (_, token, _) in state.active.lock().unwrap().values() {
+    for (_, token, _, _) in state.active.lock().unwrap().values() {
         token.cancel();
     }
     // Give active turns a bounded chance to notify MCP servers and persist
@@ -157,6 +184,9 @@ fn known(method: &str) -> bool {
             | "session/delete"
             | "session/list"
             | "session/prompt"
+            | "_session/steering"
+            | "_session/input_receipts"
+            | "_session/acknowledge_inputs"
             | "session/set_mode"
             | "session/set_config_option"
     )
@@ -184,6 +214,7 @@ async fn handle(state: Arc<State>, msg: &Value) -> Result<Value> {
             Ordering::SeqCst,
         );
         let mut result = json!({"protocolVersion":1,"agentInfo":{"name":"agent-runtime","title":state.config.name,"version":env!("CARGO_PKG_VERSION")},"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"list":{},"resume":{},"close":{},"delete":{},"additionalDirectories":{}},"mcpCapabilities":{"http":true,"sse":false},"promptCapabilities":{"image":state.config.provider.native.image_input,"audio":state.config.provider.native.audio_input,"embeddedContext":true}},"authMethods":[],"_meta":{"io.github.bkrabach.agent-runtime":{"history":{"profile":"agent-runtime.history/1","storeId":state.store.identity()?},"clientStdioMcpAllowed":state.config.allow_client_stdio_mcp}}});
+        result["_meta"]["steering"] = json!({"supported":true,"version":1,"idleBehavior":["promptRequired"],"receiptsMethod":"_session/input_receipts","acknowledgeMethod":"_session/acknowledge_inputs"});
         result["_meta"][crate::context::SNAPSHOT_META] =
             json!({"version":1,"contentBlocks":true,"originalHistoryPreserved":true});
         if state.config.allow_client_system_prompt {
@@ -276,6 +307,7 @@ async fn handle(state: Arc<State>, msg: &Value) -> Result<Value> {
             } else {
                 let sid = p["sessionId"].as_str().context("Session ID required")?;
                 let _lock = state.store.lock(sid)?;
+                state.store.recover_inputs(sid, None)?;
                 let session = state
                     .store
                     .load(sid)
@@ -344,7 +376,26 @@ async fn handle(state: Arc<State>, msg: &Value) -> Result<Value> {
             if method == "session/new" {
                 result["sessionId"] = json!(session.id);
             }
+            result["_meta"][crate::steering::META]["inputReceipts"] =
+                state.store.input_receipts(&session.id)?;
             Ok(result)
+        }
+        "_session/input_receipts" | "_session/acknowledge_inputs" => {
+            let sid = p["sessionId"].as_str().context("Session ID required")?;
+            ensure!(
+                state.loaded.lock().unwrap().contains_key(sid),
+                "Load the session before inspecting input receipts"
+            );
+            if method == "_session/acknowledge_inputs" {
+                let _lock = state.store.lock(sid)?;
+                ensure!(
+                    p["disposition"] == "proceed_without_replay",
+                    "Explicit proceed_without_replay disposition required"
+                );
+                let ids: Vec<String> = serde_json::from_value(p["inputIds"].clone())?;
+                state.store.acknowledge_inputs(sid, &ids)?;
+            }
+            Ok(json!({"inputReceipts":state.store.input_receipts(sid)?}))
         }
         "session/list" => {
             let cwd = p["cwd"].as_str().map(|c| state.config.cwd(c)).transpose()?;
@@ -362,7 +413,7 @@ async fn handle(state: Arc<State>, msg: &Value) -> Result<Value> {
                     .lock()
                     .unwrap()
                     .get(sid)
-                    .map(|(_, token, done)| {
+                    .map(|(_, token, done, _)| {
                         token.cancel();
                         done.clone()
                     })
@@ -418,6 +469,40 @@ async fn handle(state: Arc<State>, msg: &Value) -> Result<Value> {
                 json!({})
             })
         }
+        "_session/steering" => {
+            let sid = p["sessionId"].as_str().context("Session ID required")?;
+            ensure!(
+                p["_meta"]["steering"]["idleBehavior"]
+                    .as_str()
+                    .is_none_or(|b| b == "promptRequired"),
+                "Only promptRequired idle behavior is supported"
+            );
+            let loaded = state
+                .loaded
+                .lock()
+                .unwrap()
+                .get(sid)
+                .cloned()
+                .context("Load this session first")?;
+            let blocks: Vec<Value> = serde_json::from_value(p["prompt"].clone())?;
+            ensure!(!blocks.is_empty(), "Steering input must not be empty");
+            let content = crate::media::prompt(&loaded.config, &blocks)?;
+            let item = json!({"role":"user","content":content,"_acp_prompt":blocks});
+            let inbox = state
+                .active
+                .lock()
+                .unwrap()
+                .get(sid)
+                .map(|(_, _, _, i)| i.clone());
+            let Some(inbox) = inbox else {
+                return Ok(json!({"outcome":"promptRequired","reason":"noRunningTurn"}));
+            };
+            let id = p["_meta"]["steering"]["inputId"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(crate::store::id);
+            inbox.admit(&id, item)
+        }
         "session/prompt" => {
             let sid = p["sessionId"].as_str().context("Session ID required")?;
             let permit = state
@@ -426,6 +511,7 @@ async fn handle(state: Arc<State>, msg: &Value) -> Result<Value> {
                 .try_acquire_owned()
                 .context("Agent turn capacity reached; retry later")?;
             let token = CancellationToken::new();
+            let inbox = Arc::new(crate::steering::Inbox::new(state.store.clone(), sid)?);
             let loaded_session = {
                 let loaded = state.loaded.lock().unwrap();
                 let session = loaded
@@ -439,7 +525,12 @@ async fn handle(state: Arc<State>, msg: &Value) -> Result<Value> {
                 );
                 active.insert(
                     sid.into(),
-                    (msg["id"].clone(), token.clone(), CancellationToken::new()),
+                    (
+                        msg["id"].clone(),
+                        token.clone(),
+                        CancellationToken::new(),
+                        inbox.clone(),
+                    ),
                 );
                 session
             };
@@ -455,6 +546,7 @@ async fn handle(state: Arc<State>, msg: &Value) -> Result<Value> {
                 session: state.store.load(sid)?,
                 mcp: loaded_session.tools,
                 cancel: token,
+                inbox,
             };
             turn.run(serde_json::from_value(p["prompt"].clone())?).await
         }

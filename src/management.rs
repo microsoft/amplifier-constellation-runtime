@@ -25,6 +25,7 @@ pub fn schema() -> Value {
             {"id":"permissions","title":"Permissions","fields":["mode","allowed_mcp_mutations","trusted_mcp_readonly_urls","allow_client_stdio_mcp"]},
             {"id":"advanced","title":"Advanced","fields":["limits","workspace"],"advanced":true}
         ],
+        "model_catalog":crate::model_policy::catalog(),
         "provider_presets":ProviderKind::value_variants().iter().map(|k|Provider::preset(*k,String::new())).collect::<Vec<_>>(),
         "decision_presets":crate::decisions::Kind::value_variants().iter().map(|k|crate::decisions::Backend::preset(*k,format!("{k:?}").to_lowercase())).collect::<Vec<_>>()
     });

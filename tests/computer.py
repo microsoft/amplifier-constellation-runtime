@@ -7,7 +7,9 @@ from protocol import BINARY,Client
 def png(width=64,height=64):
  def chunk(t,data):return struct.pack('>I',len(data))+t+data+struct.pack('>I',zlib.crc32(t+data)&0xffffffff)
  return base64.b64encode(b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',width,height,8,2,0,0,0))+chunk(b'IDAT',zlib.compress((b'\0'+b'\xff\xff\xff'*width)*height))+chunk(b'IEND',b'')).decode()
-class Handler(BaseHTTPRequestHandler):
+from responses_ws import ResponsesWebSocketMixin
+
+class Handler(ResponsesWebSocketMixin, BaseHTTPRequestHandler):
  def log_message(self,*_):pass
  def do_POST(self):
   r=json.loads(self.rfile.read(int(self.headers['Content-Length'])));self.server.requests.append(r)

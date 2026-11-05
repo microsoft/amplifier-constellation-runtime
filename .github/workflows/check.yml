@@ -40,6 +40,8 @@ jobs:
           COMMAND_TEST_SECRET: must-not-reach-the-command
           COMMAND_TEST_TOKEN: must-not-reach-the-command
       - run: cargo build --locked
+      - run: python tests/steering.py
+      - run: python tests/steering_fallback.py
       - run: python tests/protocol.py
       - run: python tests/images.py
       - run: python tests/providers.py

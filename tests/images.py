@@ -5,7 +5,9 @@ from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from protocol import Client,BINARY
 PNG=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jC2cAAAAASUVORK5CYII=')
 IMAGE={'type':'image','mimeType':'image/png','data':base64.b64encode(PNG).decode()}
-class Handler(BaseHTTPRequestHandler):
+from responses_ws import ResponsesWebSocketMixin
+
+class Handler(ResponsesWebSocketMixin, BaseHTTPRequestHandler):
  def log_message(self,*_):pass
  def do_POST(self):
   b=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
