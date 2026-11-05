@@ -88,7 +88,9 @@ turn. The [server](../src/server.rs), [engine](../src/engine.rs) and
 
 ## What survives reconnecting?
 
-The private SQLite store retains sessions, original messages, tool calls and
+The private SQLite store uses one persistent connection shared by runtime callers;
+short storage operations finish before any model or tool wait. It retains sessions,
+original messages, tool calls and
 results, turn states, event history, context checkpoints and provider bindings.
 Provider-specific continuation data is preserved alongside public records.
 An exercised session stays bound to its provider, endpoint and model; changing

@@ -2,7 +2,10 @@ use crate::config::{Mode, private_dir};
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, MutexGuard},
+};
 
 pub fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
@@ -13,6 +16,7 @@ pub fn id() -> String {
 #[derive(Clone)]
 pub struct Store {
     pub home: PathBuf,
+    connection: Arc<Mutex<Connection>>,
 }
 #[derive(Clone)]
 pub struct Session {
@@ -23,10 +27,16 @@ pub struct Session {
     pub title: String,
 }
 impl Store {
+    /// Open once per home in a process; clone the Store for concurrent callers.
     pub fn open(home: PathBuf) -> Result<Self> {
         private_dir(&home)?;
         private_dir(&home.join("locks"))?;
-        let s = Self { home };
+        let connection = Connection::open(home.join("history.sqlite3"))?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        let s = Self {
+            home,
+            connection: Arc::new(Mutex::new(connection)),
+        };
         let db = s.db()?;
         db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,cwd TEXT NOT NULL,mode TEXT NOT NULL,title TEXT NOT NULL,updated TEXT NOT NULL,items TEXT NOT NULL); CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY AUTOINCREMENT,session TEXT NOT NULL,turn TEXT,kind TEXT NOT NULL,at TEXT NOT NULL,data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS turns(id TEXT PRIMARY KEY,session TEXT NOT NULL,state TEXT NOT NULL,started TEXT NOT NULL,finished TEXT);")?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS history_imports(session TEXT PRIMARY KEY,source TEXT NOT NULL,digest TEXT NOT NULL)")?;
@@ -39,12 +49,16 @@ impl Store {
             "INSERT OR IGNORE INTO history_identity(id,value) VALUES(1,?1)",
             [id()],
         )?;
+        drop(db);
         Ok(s)
     }
-    pub(crate) fn db(&self) -> Result<Connection> {
-        let db = Connection::open(self.home.join("history.sqlite3"))?;
-        db.busy_timeout(std::time::Duration::from_secs(5))?;
-        Ok(db)
+    // All clones share one connection. Concurrent receipt/history work must not
+    // race SQLite WAL connection close against another connection open. Keep
+    // guards inside synchronous operations, never across model/tool awaits.
+    pub(crate) fn db(&self) -> Result<MutexGuard<'_, Connection>> {
+        self.connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("History connection lock poisoned"))
     }
     pub fn identity(&self) -> Result<String> {
         Ok(self
@@ -319,6 +333,7 @@ impl Store {
             )?;
         }
         tx.commit()?;
+        drop(db);
         self.event(
             sid,
             None,
