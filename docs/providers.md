@@ -2,11 +2,11 @@
 
 Provider selection belongs inside the native Rust runtime. ACP clients, Slack adapters, browser conversations, the Agent Instance host, and the fleet manager do not need provider-specific code. This implements the common text, streaming, and function-tool loop, not every optional feature of the Amplifier Python modules.
 
-The accepted next design supports the latest verified model in each useful
-provider class, with explicit model upgrades and preserved session bindings.
+The runtime supports the latest verified model in each useful provider class,
+with explicit model upgrades and preserved session bindings.
 See the [model support policy](steering-design.md#model-support-policy-across-providers).
-That policy and native OpenAI WebSocket steering are not implemented yet; the
-reference below describes the released runtime.
+Native OpenAI generation uses Responses WebSockets and ordered steering. Other
+providers receive new input at the next legal model-call boundary.
 
 ## Available providers
 
