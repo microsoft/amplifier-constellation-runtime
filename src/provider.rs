@@ -1,5 +1,6 @@
 mod history;
 mod stream;
+mod websocket;
 
 use crate::{
     config::{Config, ProviderAuth, ProviderKind},
@@ -15,9 +16,12 @@ pub struct Provider {
     client: reqwest::Client,
     config: Config,
     key: Option<String>,
+    websocket: Option<websocket::Client>,
+    pub(crate) boundary_inputs: Vec<crate::steering::Input>,
 }
 impl Provider {
     pub fn new(config: &Config) -> Result<Self> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let p = &config.provider;
         let key = if p.kind == ProviderKind::Mock
             || matches!(p.auth, ProviderAuth::None | ProviderAuth::Chatgpt)
@@ -63,6 +67,8 @@ impl Provider {
             client: builder.build()?,
             config: config.clone(),
             key,
+            websocket: None,
+            boundary_inputs: vec![],
         })
     }
     async fn headers(
@@ -128,6 +134,9 @@ impl Provider {
                     "Cannot send another provider's state to Responses"
                 );
                 let mut b = json!({"model":p.model,"instructions":instructions,"input":history::responses(items),"tools":tools,"max_output_tokens":max,"store":false,"stream":true});
+                if p.auth == ProviderAuth::Chatgpt {
+                    b.as_object_mut().unwrap().remove("max_output_tokens");
+                }
                 if p.kind != ProviderKind::Vllm {
                     b["include"] = json!(["reasoning.encrypted_content"]);
                     b["parallel_tool_calls"] = json!(false);
@@ -143,9 +152,6 @@ impl Provider {
             ProviderKind::Anthropic => {
                 let ts:Vec<_>=tools.iter().map(|t|json!({"name":t["name"],"description":t["description"],"input_schema":t["parameters"]})).collect();
                 let mut b = json!({"model":p.model,"system":instructions,"messages":history::messages(p.kind,items)?,"tools":ts,"max_tokens":max,"stream":true});
-                if let Some(budget) = p.thinking_budget_tokens {
-                    b["thinking"] = json!({"type":"enabled","budget_tokens":budget});
-                }
                 if let Some(e) = &p.reasoning_effort {
                     b["thinking"] = json!({"type":"adaptive"});
                     b["output_config"] = json!({"effort":e});
@@ -261,16 +267,43 @@ impl Provider {
         Ok((url, body))
     }
     pub async fn complete(
-        &self,
+        &mut self,
         instructions: &str,
         items: &[Value],
         tools: &[Value],
         peer: &Peer,
-        sid: &str,
         cancel: &CancellationToken,
+        inbox: std::sync::Arc<crate::steering::Inbox>,
     ) -> Result<Value> {
+        let mut result = self
+            .complete_inner(instructions, items, tools, peer, cancel, inbox.clone())
+            .await;
+        if let Ok(response) = &mut result
+            && !self.boundary_inputs.is_empty()
+        {
+            response["_steering_inputs"] = serde_json::to_value(&self.boundary_inputs)?;
+            inbox.state(&self.boundary_inputs, "incorporated", None)?;
+            inbox
+                .receipts(&self.boundary_inputs, "incorporated", peer)
+                .await?;
+        }
+        self.boundary_inputs.clear();
+        result
+    }
+    async fn complete_inner(
+        &mut self,
+        instructions: &str,
+        items: &[Value],
+        tools: &[Value],
+        peer: &Peer,
+        cancel: &CancellationToken,
+        inbox: std::sync::Arc<crate::steering::Inbox>,
+    ) -> Result<Value> {
+        let sid = inbox.sid.clone();
+        let sid = sid.as_str();
         let p = &self.config.provider;
         if p.kind == ProviderKind::GithubCopilot {
+            inbox.state(&self.boundary_inputs, "submitted", None)?;
             let response = crate::copilot::complete(
                 &self.config,
                 self.key
@@ -300,7 +333,16 @@ impl Provider {
             );
         }
         let (url, body) = self.request(instructions, items, tools)?;
+        if p.kind == ProviderKind::Openai {
+            if self.websocket.is_none() {
+                self.websocket = Some(
+                    websocket::Client::start(self, peer.clone(), inbox, cancel.clone()).await?,
+                );
+            }
+            return self.websocket.as_mut().unwrap().complete(body).await;
+        }
         let request = self.headers(self.client.post(url)).await?.json(&body);
+        inbox.state(&self.boundary_inputs, "submitted", None)?;
         let response = tokio::select! {_=cancel.cancelled()=>bail!("Cancelled"),r=request.send()=>r.context("Model endpoint could not be reached")?};
         ensure!(
             response.status().is_success(),

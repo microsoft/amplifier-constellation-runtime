@@ -5,9 +5,12 @@ from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 import protocol
 PNG='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='
 QUESTIONS=[{'type':'predicate','name':'relevant','instructions':'Is this relevant?'},{'type':'choice','name':'route','instructions':'Who?','choices':[{'value':'lead','description':'coordination'},{'value':'builder','description':'implementation'}]},{'type':'score','name':'priority','instructions':'Priority?','levels':['low','medium','high']}]
-class Handler(BaseHTTPRequestHandler):
+from responses_ws import ResponsesWebSocketMixin
+
+class Handler(ResponsesWebSocketMixin, BaseHTTPRequestHandler):
  def log_message(self,*_):pass
  def do_GET(self):
+  if self.headers.get("Upgrade", "").lower()=="websocket":return super().do_GET()
   self.server.case.setdefault('downloads',[]).append((self.path,dict(self.headers)))
   data=base64.b64decode(PNG);self.send_response(200);self.send_header('Content-Type','image/png');self.end_headers();self.wfile.write(data)
  def do_POST(self):

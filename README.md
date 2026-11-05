@@ -6,6 +6,9 @@ A standalone Rust agent with its own model/tool loop, durable sessions, and an A
 
 Each installation has a private home, explicit workspace, model credential reference, and execution limits. Connect an ACP client directly over stdio, or use the independent [Agent Instance](https://github.com/microsoft/amplifier-constellation-instance) service for remote access, management, profiles, conversation sources, and durable background responsibilities. Experiences and adapters remain separate projects.
 
+Start with [How the runtime works](docs/runtime-overview.md) for a visual overview
+of the current design and the responsibilities of Runtime, Instance and adapters.
+
 ## Start one agent
 
 Build with Rust 1.88 or later:

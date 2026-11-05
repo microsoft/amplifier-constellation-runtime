@@ -345,6 +345,9 @@ async fn main() -> Result<()> {
         );
         return Ok(());
     }
+    // Inspection stays available to repair obsolete settings; execution and
+    // readiness still require a valid configuration after any edit path.
+    config.validate(&home)?;
     if let Command::Decide { backend, file } | Command::Assess { backend, file, .. } = &args.command
     {
         let b = config

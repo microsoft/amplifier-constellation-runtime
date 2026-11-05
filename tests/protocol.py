@@ -9,7 +9,9 @@ REQUESTS = []
 CLOSE_STARTED = threading.Event()
 CLOSE_RELEASE = threading.Event()
 
-class Handler(BaseHTTPRequestHandler):
+from responses_ws import ResponsesWebSocketMixin
+
+class Handler(ResponsesWebSocketMixin, BaseHTTPRequestHandler):
     def log_message(self, *_): pass
     def do_POST(self):
         body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))

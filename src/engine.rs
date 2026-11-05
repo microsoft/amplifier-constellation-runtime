@@ -18,10 +18,14 @@ pub struct Turn<'a> {
     pub session: Session,
     pub mcp: Arc<mcp::Tools>,
     pub cancel: CancellationToken,
+    pub inbox: Arc<crate::steering::Inbox>,
 }
 impl Turn<'_> {
     pub async fn run(mut self, prompt: Vec<Value>) -> Result<Value> {
         let _lock = self.store.lock(&self.session.id)?;
+        self.store
+            .recover_inputs(&self.session.id, Some(&self.inbox.turn))?;
+        self.store.ensure_inputs_resolved(&self.session.id)?;
         self.store.bind_provider(
             &self.session.id,
             &self.config.provider.fingerprint(),
@@ -51,7 +55,7 @@ impl Turn<'_> {
             .items
             .push(json!({"role":"user","content":content,"_acp_prompt":prompt}));
         self.store.save(&self.session)?;
-        let turn = self.store.begin(&self.session.id)?;
+        let turn = self.store.begin_id(&self.session.id, &self.inbox.turn)?;
         self.store.event(
             &self.session.id,
             Some(&turn),
@@ -77,6 +81,8 @@ impl Turn<'_> {
             Ok(_) => "budget_exhausted",
             Err(_) => "failed",
         };
+        self.inbox.close(state)?;
+        self.inbox.publish_summary(self.peer).await?;
         self.store.finish(&turn, state)?;
         self.store.event(
             &self.session.id,
@@ -85,11 +91,11 @@ impl Turn<'_> {
             json!({"state":state}),
         )?;
         Ok(
-            json!({"stopReason":result?,"_meta":{"io.github.bkrabach.agent-runtime":{"turnId":turn,"state":state}}}),
+            json!({"stopReason":result?,"_meta":{"io.github.bkrabach.agent-runtime":{"turnId":turn,"state":state,"inputReceipts":self.inbox.summary()?}}}),
         )
     }
     async fn execute(&mut self, turn: &str) -> Result<&'static str> {
-        let provider = Provider::new(self.config)?;
+        let mut provider = Provider::new(self.config)?;
         if !self.mcp.unavailable.is_empty() {
             self.store.event(
                 &self.session.id,
@@ -158,14 +164,26 @@ impl Turn<'_> {
         );
         let mut tool_count = 0;
         let mut used_calls = HashSet::new();
+        let mut provider_continuation_only = false;
         for call_index in 0..self.config.limits.max_model_calls {
+            if self.config.provider.kind != crate::config::ProviderKind::Openai
+                && !provider_continuation_only
+            {
+                let pending = self.inbox.queued()?;
+                provider.boundary_inputs = pending;
+            }
+            // Candidates live in the durable inbox until the provider completes.
+            // Rejected or ambiguous input must not become authoritative history
+            // and silently reappear in a later request after reconciliation.
+            let mut request_items = self.session.items.clone();
+            request_items.extend(provider.boundary_inputs.iter().map(|p| p.item.clone()));
             let fixed_bytes = instructions.len() + serde_json::to_vec(&definitions)?.len();
             ensure!(
                 fixed_bytes < self.config.limits.max_context_bytes,
                 "Instructions and tool definitions exceed the context budget"
             );
             let view = crate::context::prepare(
-                &self.session.items,
+                &request_items,
                 &self.config.context,
                 self.config.limits.max_context_bytes - fixed_bytes,
             )?;
@@ -195,8 +213,8 @@ impl Turn<'_> {
                     &view.items,
                     &definitions,
                     self.peer,
-                    &self.session.id,
                     &self.cancel,
+                    self.inbox.clone(),
                 )
                 .await?;
             self.store.event(
@@ -205,21 +223,32 @@ impl Turn<'_> {
                 "model.finished",
                 json!({"index":call_index+1,"usage":response["usage"],"status":response["status"]}),
             )?;
+            let inputs: Vec<crate::steering::Input> = response
+                .get("_steering_inputs")
+                .map(|v| serde_json::from_value(v.clone()))
+                .transpose()?
+                .unwrap_or_default();
+            self.session
+                .items
+                .extend(inputs.iter().map(|i| i.item.clone()));
             let output = response["output"]
                 .as_array()
                 .context("Model response has no output list")?;
             let output_start = self.session.items.len();
             self.session.items.extend(output.iter().cloned());
-            self.store.save(&self.session)?;
+            self.inbox.save_inputs(&self.session, &inputs)?;
             for item in output {
                 for update in crate::media::updates(item, false)? {
                     self.peer.update(&self.session.id, update).await?;
                 }
             }
-            if response["stop_reason"] == "pause_turn" {
+            provider_continuation_only = response["stop_reason"] == "pause_turn";
+            if provider_continuation_only {
                 continue;
             }
-            if response["status"] != "completed" {
+            if response["status"] != "completed"
+                && response["incomplete_details"]["reason"] != "steered"
+            {
                 return Ok(if response["stop_reason"] == "refusal" {
                     "refusal"
                 } else {
@@ -285,6 +314,9 @@ impl Turn<'_> {
                         )?;
                         self.peer.update(&self.session.id,json!({"sessionUpdate":"tool_call_update","toolCallId":call_id,"status":status,"rawOutput":detail})).await?;
                     }
+                }
+                if response["_continue"] == true || !self.inbox.try_close()? {
+                    continue;
                 }
                 return Ok("end_turn");
             }
