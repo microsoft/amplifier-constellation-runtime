@@ -2,7 +2,7 @@ use crate::{
     config::{Config, Mode},
     engine::Turn,
     mcp,
-    rpc::{Peer, frame},
+    rpc::Peer,
     store::Store,
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -14,11 +14,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use tokio::{
-    io::{AsyncWriteExt, BufReader},
-    sync::{Semaphore, mpsc},
-    task::JoinSet,
-};
+use tokio::{sync::Semaphore, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
 type ActiveTurn = (
@@ -82,8 +78,13 @@ impl Drop for Active {
     }
 }
 pub async fn serve(config: Config, store: Store) -> Result<()> {
-    let (tx, mut rx) = mpsc::channel(128);
-    let peer = Peer::new(tx);
+    let mut connection = amplifier_acp_connection::Connection::agent(
+        tokio::io::stdin(),
+        tokio::io::stdout(),
+        24 * 1024 * 1024,
+    )
+    .await?;
+    let peer = Peer::new(connection.sender.clone());
     let state = Arc::new(State {
         slots: Arc::new(Semaphore::new(config.limits.max_parallel_turns)),
         config,
@@ -94,41 +95,11 @@ pub async fn serve(config: Config, store: Store) -> Result<()> {
         client_form_elicitation: AtomicBool::new(false),
         active: Mutex::new(HashMap::new()),
     });
-    let writer = tokio::spawn(async move {
-        let mut out = tokio::io::stdout();
-        while let Some(value) = rx.recv().await {
-            out.write_all(format!("{value}\n").as_bytes()).await?;
-            out.flush().await?;
-        }
-        Ok::<_, std::io::Error>(())
-    });
-    // frame() keeps a partial line in its future. Keep that future alive while
-    // requests finish; racing it directly with join_next() could discard bytes.
-    let (frames_tx, mut frames_rx) = mpsc::channel(16);
-    let reader = tokio::spawn(async move {
-        let mut input = BufReader::new(tokio::io::stdin());
-        loop {
-            match frame(&mut input).await {
-                Ok(Some(value)) => {
-                    if frames_tx.send(Ok(value)).await.is_err() {
-                        break;
-                    }
-                }
-                Ok(None) => break,
-                Err(error) => {
-                    let _ = frames_tx.send(Err(error)).await;
-                    break;
-                }
-            }
-        }
-    });
     let mut tasks = JoinSet::new();
     let result=async {loop {
         tokio::select! {
-            result=frames_rx.recv()=> {
-                let Some(msg)=result else {break};
-                let msg=msg?;
-                if msg.get("method").is_none(){peer.response(msg);continue;}
+            result=connection.recv()=> {
+                let Some(msg)=result? else {break};
                 ensure!(msg["jsonrpc"]=="2.0","Expected JSON-RPC 2.0");
                 let method=msg["method"].as_str().context("Method must be a string")?;
                 if matches!(method,"session/cancel"|"$/cancel_request") {
@@ -166,11 +137,9 @@ pub async fn serve(config: Config, store: Store) -> Result<()> {
         tasks.abort_all();
     }
     while tasks.join_next().await.is_some() {}
-    reader.abort();
-    let _ = reader.await;
     drop(state);
     drop(peer);
-    let _ = writer.await;
+    drop(connection);
     result
 }
 fn known(method: &str) -> bool {

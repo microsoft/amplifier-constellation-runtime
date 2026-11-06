@@ -9,6 +9,7 @@ repository = "https://github.com/microsoft/amplifier-constellation-runtime"
 description = "Native Rust ACP agent engine, provider and tool execution, durable sessions."
 
 [dependencies]
+amplifier-acp-connection = { path = "../contracts/crates/acp-connection" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
