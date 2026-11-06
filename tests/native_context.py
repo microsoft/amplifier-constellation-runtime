@@ -19,6 +19,10 @@ class Handler(ResponsesWebSocketMixin,BaseHTTPRequestHandler):
         body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         self.server.requests.append((self.path,body))
         if self.path.endswith('/compact'):
+            if self.server.compact_error:
+                return self.reply({'error':{'code':'context_length_exceeded','message':'PRIVATE_ERROR_CANARY','param':'PRIVATE_PARAM_CANARY'}},400)
+            if len(json.dumps(body['input'])) > 100000:
+                return self.reply({'error':{'code':'context_length_exceeded'}},400)
             retained=body['input'][0]['content'] if self.server.retain_large_input else 'canonical retained item'
             return self.reply({'output':[{'role':'user','content':retained},{'type':'compaction','encrypted_content':'PRIVATE_OPAQUE'}],'usage':{'input_tokens':14000,'output_tokens':200}})
         if body.get('compaction'):
@@ -40,7 +44,7 @@ class Handler(ResponsesWebSocketMixin,BaseHTTPRequestHandler):
 class Tests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.home=Path(self.tmp.name)/'home';self.work=Path(self.tmp.name)/'work';self.c=None
-        self.server=ThreadingHTTPServer(('127.0.0.1',0),Handler);self.server.requests=[];self.server.discovered=[];self.server.bad_compaction=False;self.server.truncate=False;self.server.retain_large_input=False
+        self.server=ThreadingHTTPServer(('127.0.0.1',0),Handler);self.server.requests=[];self.server.discovered=[];self.server.bad_compaction=False;self.server.truncate=False;self.server.retain_large_input=False;self.server.compact_error=False
         threading.Thread(target=self.server.serve_forever,daemon=True).start()
     def tearDown(self):
         if self.c:self.c.close()
@@ -53,6 +57,52 @@ class Tests(unittest.TestCase):
         self.c=protocol.Client(self.home);self.c.call('initialize',{'protocolVersion':1,'clientCapabilities':{}})
         self.sid=self.c.call('session/new',{'cwd':str(self.work),'mcpServers':[]})['result']['sessionId']
     def prompt(self,text):return self.c.call('session/prompt',{'sessionId':self.sid,'prompt':[{'type':'text','text':text}]})
+    def test_existing_oversized_transcript_is_bounded_before_native_compaction(self):
+        self.start('openai');self.c.close();self.c=None
+        original=[]
+        for i in range(120):
+            original.extend([{'role':'user','content':f'historical request {i}: '+('x'*10000)},
+                             {'type':'message','role':'assistant','content':[{'type':'output_text','text':'Recorded historical result'}]}])
+        with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:
+            db.execute('UPDATE sessions SET items=? WHERE id=?',(json.dumps(original),self.sid));db.commit()
+        self.c=protocol.Client(self.home);self.c.call('initialize',{'protocolVersion':1,'clientCapabilities':{}})
+        self.c.call('session/load',{'sessionId':self.sid,'cwd':str(self.work),'mcpServers':[]})
+        self.assertEqual(self.prompt('A fresh question, without repeating earlier actions')['result']['stopReason'],'end_turn')
+        sent=[b for p,b in self.server.requests if p=='/responses'][-1]
+        self.assertLess(len(json.dumps(sent['input'])),64000)
+        self.assertIn('session_history',json.dumps(sent['input']))
+        with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:
+            saved=json.loads(db.execute('SELECT items FROM sessions WHERE id=?',(self.sid,)).fetchone()[0])
+            checkpoints=[json.loads(r[0]) for r in db.execute('SELECT data FROM context_checkpoints')]
+        self.assertEqual(saved[:len(original)],original)
+        self.assertTrue(any(c['kind']=='extractive' for c in checkpoints))
+        self.assertFalse(self.c.callbacks)
+
+    def test_native_path_replaces_only_declared_old_snapshots(self):
+        self.start('openai')
+        def marked(text,retained):
+            return self.c.call('session/prompt',{'sessionId':self.sid,'prompt':[{'type':'text','text':text,'_meta':{'com.microsoft.amplifier.context-snapshot':{'version':1,'key':'room','retainedText':retained}}}]})
+        self.assertEqual(marked('OLD_SNAPSHOT '+('a'*10000),'original request')['result']['stopReason'],'end_turn')
+        self.assertEqual(marked('NEW_SNAPSHOT','new request')['result']['stopReason'],'end_turn')
+        sent=[b for p,b in self.server.requests if p=='/responses'][-1]
+        self.assertNotIn('OLD_SNAPSHOT',json.dumps(sent['input']))
+        self.assertIn('original request',json.dumps(sent['input']))
+        self.assertIn('NEW_SNAPSHOT',json.dumps(sent['input']))
+        with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:
+            self.assertIn('OLD_SNAPSHOT',db.execute('SELECT items FROM sessions').fetchone()[0])
+
+    def test_compaction_rejection_records_safe_reason_not_provider_payload(self):
+        self.start('openai');self.server.compact_error=True
+        self.assertIn('error',self.prompt('Original '+('x'*50000)))
+        with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:
+            data=[json.loads(r[0]) for r in db.execute("SELECT data FROM events WHERE kind='context.compaction.failed'")]
+            events=' '.join(r[0] for r in db.execute('SELECT data FROM events'))
+        self.assertEqual(data[-1]['reason'],'context_length_exceeded')
+        self.assertEqual(data[-1]['http_status'],400)
+        self.assertNotIn('PRIVATE_ERROR_CANARY',events)
+        self.assertNotIn('PRIVATE_PARAM_CANARY',events)
+        self.assertFalse(any(p=='/responses' for p,b in self.server.requests))
+
     def test_openai_canonical_window_survives_restart_without_pruning_or_exporting_opaque_state(self):
         self.start('openai');original='original evidence '+('x'*50000)
         self.assertEqual(self.prompt(original)['result']['stopReason'],'end_turn')
