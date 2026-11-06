@@ -416,6 +416,8 @@ impl Provider {
                         peer.update(sid, messages.chunk(&event, &text)).await?;
                     }
                 }
+                let completed = messages.completed(&event);
+                peer.complete_public_message(sid, completed).await?;
                 if collector.terminal() {
                     let mut response = collector.finish()?;
                     messages.finish(&mut response);
@@ -430,6 +432,8 @@ impl Provider {
                 for text in collector.event(event.clone())? {
                     peer.update(sid, messages.chunk(&event, &text)).await?;
                 }
+                let completed = messages.completed(&event);
+                peer.complete_public_message(sid, completed).await?;
             }
         }
         let mut response = collector.finish()?;

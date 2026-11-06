@@ -13,12 +13,14 @@ use tokio_util::sync::CancellationToken;
 pub struct Peer {
     wire: amplifier_acp_connection::Sender,
     pub compaction_supported: Arc<AtomicBool>,
+    pub message_completion_supported: Arc<AtomicBool>,
 }
 impl Peer {
     pub fn new(wire: amplifier_acp_connection::Sender) -> Self {
         Self {
             wire,
             compaction_supported: Arc::new(AtomicBool::new(false)),
+            message_completion_supported: Arc::new(AtomicBool::new(false)),
         }
     }
     pub async fn send(&self, value: Value) -> Result<()> {
@@ -31,6 +33,14 @@ impl Peer {
             json!({"sessionUpdate":if status=="in_progress"{"tool_call"}else{"tool_call_update"},"toolCallId":id,"title":"Compacting conversation","kind":"think","status":status})
         };
         self.update(sid, update).await
+    }
+    pub async fn complete_public_message(&self, sid: &str, update: Option<Value>) -> Result<()> {
+        if self.message_completion_supported.load(Ordering::SeqCst)
+            && let Some(update) = update
+        {
+            self.update(sid, update).await?;
+        }
+        Ok(())
     }
     pub async fn update(&self, sid: &str, update: Value) -> Result<()> {
         self.send(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":update}})).await

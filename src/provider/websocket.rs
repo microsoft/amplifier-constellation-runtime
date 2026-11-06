@@ -602,6 +602,10 @@ impl Driver {
                         .await?;
                 }
                 self.messages.observe(&event);
+                let completed = self.messages.completed(&event);
+                self.peer
+                    .complete_public_message(&self.inbox.sid, completed)
+                    .await?;
             }
             "response.output_text.delta" | "response.refusal.delta" => {
                 if let Some(text) = event["delta"].as_str() {
