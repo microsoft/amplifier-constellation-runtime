@@ -1,4 +1,5 @@
 """Saved provider identity across JSON feature changes; local fixture only."""
+from contextlib import closing
 import hashlib
 import json
 import sqlite3
@@ -36,7 +37,7 @@ class Tests(unittest.TestCase):
             {'type': 'function_call_output', 'call_id': 'settled-before-upgrade',
              'output': 'Previously completed; do not repeat'},
         ]
-        with sqlite3.connect(self.home / 'history.sqlite3') as db:
+        with closing(sqlite3.connect(self.home / 'history.sqlite3')) as db, db:
             db.execute('UPDATE sessions SET items=? WHERE id=?',
                        (json.dumps(history), sid))
             db.execute('INSERT INTO session_providers VALUES (?,?)', (sid, key))
@@ -47,7 +48,7 @@ class Tests(unittest.TestCase):
         return sid, history
 
     def snapshot(self, sid):
-        with sqlite3.connect(self.home / 'history.sqlite3') as db:
+        with closing(sqlite3.connect(self.home / 'history.sqlite3')) as db, db:
             return {
                 'binding': db.execute('SELECT provider_key FROM session_providers '
                                       'WHERE session=?', (sid,)).fetchone()[0],
@@ -104,7 +105,7 @@ class Tests(unittest.TestCase):
                     self.assertIn('different provider', response['error']['message'])
                     self.assertEqual(self.snapshot(sid), before)
                     self.assertEqual(len(protocol.REQUESTS), count)
-                    with sqlite3.connect(self.home / 'history.sqlite3') as db:
+                    with closing(sqlite3.connect(self.home / 'history.sqlite3')) as db, db:
                         events = [json.loads(row[0]) for row in db.execute(
                             "SELECT data FROM events WHERE session=? AND kind='turn.rejected'", (sid,))]
                     self.assertEqual(events, [{'stage': 'provider_binding',
