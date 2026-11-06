@@ -49,6 +49,7 @@ jobs:
       - run: python tests/protocol.py
       - run: python tests/images.py
       - run: python tests/providers.py
+      - run: python tests/provider_identity.py
       - run: python tests/capabilities.py
       - run: python tests/computer.py
       - run: python tests/management.py
