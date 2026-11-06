@@ -182,11 +182,16 @@ async fn handle(state: Arc<State>, msg: &Value) -> Result<Value> {
             p["clientCapabilities"]["session"]["compaction"].is_object(),
             Ordering::SeqCst,
         );
+        state.peer.message_completion_supported.store(
+            amplifier_acp_connection::speech::supported(&p["clientCapabilities"]),
+            Ordering::SeqCst,
+        );
         state.client_form_elicitation.store(
             p["clientCapabilities"]["elicitation"]["form"].is_object(),
             Ordering::SeqCst,
         );
         let mut result = json!({"protocolVersion":1,"agentInfo":{"name":"agent-runtime","title":state.config.name,"version":env!("CARGO_PKG_VERSION")},"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"list":{},"resume":{},"close":{},"delete":{},"additionalDirectories":{}},"mcpCapabilities":{"http":true,"sse":false},"promptCapabilities":{"image":state.config.provider.native.image_input,"audio":state.config.provider.native.audio_input,"embeddedContext":true}},"authMethods":[],"_meta":{"io.github.bkrabach.agent-runtime":{"history":{"profile":"agent-runtime.history/1","storeId":state.store.identity()?},"clientStdioMcpAllowed":state.config.allow_client_stdio_mcp}}});
+        amplifier_acp_connection::speech::advertise(&mut result);
         result["_meta"]["steering"] = json!({"supported":true,"version":1,"idleBehavior":["promptRequired"],"receiptsMethod":"_session/input_receipts","acknowledgeMethod":"_session/acknowledge_inputs"});
         result["_meta"][crate::context::SNAPSHOT_META] =
             json!({"version":1,"contentBlocks":true,"originalHistoryPreserved":true});
