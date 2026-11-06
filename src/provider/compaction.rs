@@ -114,10 +114,18 @@ impl Provider {
             || (grew
                 && (bytes > budget * 3 / 4
                     || self.context_tokens >= self.config.context.compact_threshold_tokens as u64));
-        // OpenAI compacts active chains on the server. Never replace an active
-        // chain while a steering successor might already be executing.
-        let can_compact =
-            self.config.provider.kind != ProviderKind::Openai || self.websocket.is_none();
+        // Native automatic compaction and steering cannot currently coexist.
+        // Claim a settled socket boundary before /compact. New inputs remain
+        // durable/local during maintenance, and accepted steering is never
+        // cancelled or replayed to obtain a smaller model window.
+        let can_compact = if due && self.config.provider.kind == ProviderKind::Openai {
+            match self.websocket.as_mut() {
+                Some(socket) => socket.begin_compaction().await?,
+                None => true,
+            }
+        } else {
+            true
+        };
         if due && can_compact {
             ensure!(
                 self.compactions < self.config.context.max_compactions_per_turn,

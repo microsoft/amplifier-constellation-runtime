@@ -26,8 +26,12 @@ struct Request {
     continuation_items: Vec<Value>,
     reply: oneshot::Sender<Result<Value>>,
 }
+enum Command {
+    Response(Request),
+    BeginCompaction(oneshot::Sender<bool>),
+}
 pub struct Client {
-    requests: mpsc::Sender<Request>,
+    requests: mpsc::Sender<Command>,
     task: tokio::task::JoinHandle<()>,
 }
 impl Drop for Client {
@@ -126,6 +130,7 @@ impl Client {
                 failure_stage: "connect",
                 failure_category: "transport",
                 idle,
+                maintenance: false,
             };
             if let Err(e) = driver.run().await {
                 // Provider bodies, source text, URLs and credentials never enter
@@ -150,15 +155,27 @@ impl Client {
     pub async fn complete(&mut self, body: Value, continuation_items: Vec<Value>) -> Result<Value> {
         let (tx, rx) = oneshot::channel();
         self.requests
-            .send(Request {
+            .send(Command::Response(Request {
                 body,
                 continuation_items,
                 reply: tx,
-            })
+            }))
             .await
             .context("Model WebSocket closed; saved input receipts remain available for review")?;
         rx.await
             .context("Model WebSocket interrupted; no response or tool was replayed")?
+    }
+    /// The socket owner serializes this boundary with steering delivery. A
+    /// successful claim holds newly arriving inputs locally until the next
+    /// explicit response, while preserving this turn's response-call budget.
+    pub async fn begin_compaction(&mut self) -> Result<bool> {
+        let (tx, rx) = oneshot::channel();
+        self.requests
+            .send(Command::BeginCompaction(tx))
+            .await
+            .context("Model connection closed before context maintenance")?;
+        rx.await
+            .context("Model connection interrupted before context maintenance")
     }
 }
 struct Pending {
@@ -175,7 +192,7 @@ struct Driver {
     connection_request: tokio_tungstenite::tungstenite::http::Request<()>,
     connector: Option<Connector>,
     opened_at: tokio::time::Instant,
-    requests: mpsc::Receiver<Request>,
+    requests: mpsc::Receiver<Command>,
     peer: Peer,
     inbox: Arc<Inbox>,
     cancel: CancellationToken,
@@ -199,6 +216,7 @@ struct Driver {
     seen_created: HashMap<String, Option<String>>,
     seen_completed: HashMap<String, Value>,
     seen_accepted: HashMap<String, String>,
+    maintenance: bool,
 }
 fn failure_code(error: &anyhow::Error) -> &'static str {
     match error.to_string().as_str() {
@@ -218,6 +236,7 @@ fn failure_code(error: &anyhow::Error) -> &'static str {
         "Model WebSocket closed; no pending input was replayed" => "connection_closed",
         "Logical turn model-call budget exhausted" => "model_call_budget",
         "Model WebSocket stopped answering; no pending input was replayed" => "transport_idle",
+        "Model rejected steering; input retained, not retried automatically" => "steering_rejected",
         _ => "request_failed",
     }
 }
@@ -247,7 +266,8 @@ impl Driver {
         Ok(true)
     }
     async fn steer(&mut self) -> Result<()> {
-        if self.pending.is_some()
+        if self.maintenance
+            || self.pending.is_some()
             || self.auto_wait
             || self.awaiting_created
             || self.created >= self.max
@@ -298,6 +318,7 @@ impl Driver {
         if self.running || self.auto_wait {
             return Ok(());
         }
+        self.maintenance = false;
         // A late arrival after a final response belongs to its automatic successor.
         if self.id.is_some() && !self.needs_tools {
             self.steer().await?;
@@ -416,6 +437,33 @@ impl Driver {
         self.send(body).await
     }
     async fn event(&mut self, event: Value) -> Result<()> {
+        if matches!(
+            event["type"].as_str(),
+            Some("response.steer.failed" | "response.failed" | "error")
+        ) {
+            // Known codes are actionable; arbitrary provider strings can echo
+            // private inputs. Never log the response body or error message.
+            let raw = event["error"]["code"]
+                .as_str()
+                .or_else(|| event["response"]["error"]["code"].as_str());
+            let code = match raw {
+                Some(
+                    "invalid_input"
+                    | "steering_not_supported"
+                    | "response_not_found"
+                    | "too_many_pending_steers"
+                    | "rate_limit_exceeded"
+                    | "server_error"
+                    | "invalid_request_error"
+                    | "context_length_exceeded",
+                ) => raw.unwrap(),
+                _ => "unclassified",
+            };
+            self.inbox.store.event(&self.inbox.sid, Some(&self.inbox.turn), "provider.error",
+                json!({"event":event["type"],"code":code,
+                    "pending_inputs":self.pending.as_ref().map_or(0,|p|p.inputs.len()),
+                    "steering_accepted":self.pending.as_ref().is_some_and(|p|p.remote_id.is_some())}))?;
+        }
         match event["type"].as_str().unwrap_or("") {
             "response.created" => {
                 let id = event["response"]["id"]
@@ -636,7 +684,21 @@ impl Driver {
             tokio::select! {
              biased;
              _=self.cancel.cancelled()=>{let _=self.socket.close(None).await;return Ok(())},
-             request=self.requests.recv()=>{let Some(request)=request else {return Ok(())};self.failure_stage="request";self.failure_category="runtime_boundary";let opened=self.opened_at;self.request(request).await?;if self.opened_at!=opened{last_received=self.opened_at;}},
+             command=self.requests.recv()=>{let Some(command)=command else {return Ok(())};
+                match command {
+                    Command::Response(request)=>{
+                        self.failure_stage="request";self.failure_category="runtime_boundary";
+                        let opened=self.opened_at;self.request(request).await?;
+                        if self.opened_at!=opened{last_received=self.opened_at;}
+                    }
+                    Command::BeginCompaction(reply)=>{
+                        let settled=!self.running && !self.awaiting_created && !self.auto_wait
+                            && self.pending.is_none() && self.waiter.is_none() && self.ready.is_empty();
+                        if settled { self.maintenance=true; self.id=None; }
+                        let _=reply.send(settled);
+                    }
+                }
+             },
              event=self.socket.next()=>{last_received=tokio::time::Instant::now();self.failure_stage="receive";self.failure_category="transport";match event.context("Model WebSocket closed before work settled")?.context("Model WebSocket interrupted")? {
               Message::Text(text)=>{self.total_bytes+=text.len();ensure!(self.total_bytes<=128*1024*1024,"Logical turn model stream exceeded byte budget");let event:Value=serde_json::from_str(&text).context("Invalid model WebSocket event")?;self.failure_stage="event";self.failure_category=if matches!(event["type"].as_str(),Some("response.failed"|"error"|"response.steer.failed")){"provider"}else{"protocol"};self.event(event).await?;},
               Message::Ping(data)=>self.socket.send(Message::Pong(data)).await?,

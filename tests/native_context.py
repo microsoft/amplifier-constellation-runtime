@@ -59,7 +59,7 @@ class Tests(unittest.TestCase):
         sent=[b for p,b in self.server.requests if p=='/responses'][-1]
         self.assertEqual(sent['input'][0]['content'],'canonical retained item')
         self.assertEqual(sent['input'][1]['encrypted_content'],'PRIVATE_OPAQUE')
-        self.assertEqual(sent['context_management'][0]['compact_threshold'],100000)
+        self.assertNotIn('context_management',sent,'Automatic compaction rejects native steering')
         self.c.close();self.c=protocol.Client(self.home);self.c.call('initialize',{'protocolVersion':1,'clientCapabilities':{}})
         self.c.call('session/load',{'sessionId':self.sid,'cwd':str(self.work),'mcpServers':[]})
         self.assertNotIn('PRIVATE_OPAQUE',json.dumps(self.c.updates))

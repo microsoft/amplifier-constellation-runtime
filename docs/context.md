@@ -11,12 +11,20 @@ No transcript is copied into the instance database. Replacing the native store c
 ## Working context and compaction
 
 The saved transcript stays intact. Model requests use a separate working window.
-OpenAI Responses uses server compaction during a live WebSocket chain, and the
-standalone compact endpoint before starting a large new chain. The entire
-standalone response is the canonical next window; only a server compaction item
-may replace an older prefix. Steering successors and pending tool results remain
-on their original chain. Provider-signed or opaque records never enter public
-history or status labels.
+OpenAI Responses uses the standalone compact endpoint at a settled boundary,
+including between tool steps of a long turn. Automatic `context_management`
+compaction is disabled because the live API rejects `response.steer` with that
+setting. The socket owner claims the boundary only with no running response,
+accepted steering, awaited creation, or unread response. Inputs arriving during
+maintenance remain in the durable local queue, then join the next response in
+order. Accepted successors and tool results stay on their original chain.
+The same socket driver retains its model-call budget across maintenance.
+
+The entire compact response is the canonical next window; only a server
+compaction item already present in saved history may prune an older prefix.
+Provider-signed or opaque records never enter public history or status labels.
+Allowlisted provider error codes distinguish unsupported steering settings from
+transport failures without exporting raw error bodies or message contents.
 
 Anthropic uses capability-checked on-demand compaction (`compact-2026-09-04`).
 The exact signed block is retained with the unchanged system/tools/settings.
