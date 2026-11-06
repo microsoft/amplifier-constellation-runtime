@@ -59,6 +59,8 @@ This creates a new installation, copies the engine, stores a private credential 
 
 `config-schema`, `config-inspect`, `config-validate`, and revision-checked `configure` expose the same complete configuration to the CLI, Agent Instance, and an external management UI. [Configuration contract](docs/configuration.md) covers updates, backups, and restart behavior.
 
+Owners using a dedicated installation container can enable [container-local administrator commands](docs/container-commands.md) for package installation while keeping host access outside that container.
+
 [GitHub Copilot](docs/copilot.md) uses the pinned official SDK for model inference while this Rust runtime retains tool execution, permissions, and saved history.
 
 [Continue with ChatGPT](docs/chatgpt.md) supports a separate subscription authorization and account model catalog, with explicit user consent. It never imports Codex credentials.

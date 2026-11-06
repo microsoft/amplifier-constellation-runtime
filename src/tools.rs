@@ -15,6 +15,15 @@ pub fn definitions() -> Vec<Value> {
     definitions_for_network(crate::config::CommandNetwork::Isolated)
 }
 pub fn definitions_for_network(network: crate::config::CommandNetwork) -> Vec<Value> {
+    definitions_for_boundary(network, crate::config::CommandBoundary::Workspace)
+}
+pub fn definitions_for_config(config: &Config) -> Vec<Value> {
+    definitions_for_boundary(config.command_network, config.command_boundary)
+}
+fn definitions_for_boundary(
+    network: crate::config::CommandNetwork,
+    boundary: crate::config::CommandBoundary,
+) -> Vec<Value> {
     let mut result = vec![
         definition("clock", "Read the current UTC time.", json!({}), vec![]),
         definition(
@@ -48,13 +57,19 @@ pub fn definitions_for_network(network: crate::config::CommandNetwork) -> Vec<Va
             vec!["path", "content"],
         ),
     ];
-    if command_isolation().is_some() {
-        let description = match network {
-            crate::config::CommandNetwork::Isolated => {
-                "Run a bounded local command in the agent's workspace. Workspace and system binaries only; networking disabled. No host home or provider credentials. Returns actual exit code and bounded stdout/stderr. Requires write permission."
-            }
-            crate::config::CommandNetwork::Inherit => {
-                "Run a bounded local command in the agent's workspace. Networking uses the enclosing installation's network and firewall, so repository checkout and dependency downloads can be attempted. Workspace filesystem boundaries remain enforced; no host home or provider credentials. Returns actual exit code and bounded stdout/stderr. Requires write permission. Diagnose a failed connection before declaring all networking unavailable."
+    let container =
+        boundary == crate::config::CommandBoundary::Container && container_boundary_available();
+    if container || command_isolation().is_some() {
+        let description = if container {
+            "Run a bounded command inside this agent's installation container. You can install packages and administer the container with sudo -n; the container filesystem, its mounted installation files, and its network policy are the boundary. This does not grant host Docker, host files, or other agents' installations. Use actual tool results to check capabilities. Provider environment variables are not inherited. Returns actual exit code and bounded stdout/stderr. Requires write permission."
+        } else {
+            match network {
+                crate::config::CommandNetwork::Isolated => {
+                    "Run a bounded local command in the agent's workspace. Workspace and system binaries only; networking disabled. No host home or provider credentials. Returns actual exit code and bounded stdout/stderr. Requires write permission."
+                }
+                crate::config::CommandNetwork::Inherit => {
+                    "Run a bounded local command in the agent's workspace. Networking uses the enclosing installation's network and firewall, so repository checkout and dependency downloads can be attempted. Workspace filesystem boundaries remain enforced; no host home or provider credentials. Returns actual exit code and bounded stdout/stderr. Requires write permission. Diagnose a failed connection before declaring all networking unavailable."
+                }
             }
         };
         result.push(definition(
@@ -65,6 +80,39 @@ pub fn definitions_for_network(network: crate::config::CommandNetwork) -> Vec<Va
         ));
     }
     result
+}
+pub fn container_boundary_available() -> bool {
+    if !cfg!(target_os = "linux") || !Path::new("/.dockerenv").is_file() {
+        return false;
+    }
+    let marker = "/etc/constellation-container.json";
+    let Ok(metadata) = std::fs::metadata(marker) else {
+        return false;
+    };
+    if metadata.len() > 16 * 1024 {
+        return false;
+    }
+    let Ok(data) = std::fs::read(marker) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_slice::<Value>(&data) else {
+        return false;
+    };
+    let mounted_read_only = std::fs::read_to_string("/proc/self/mountinfo").is_ok_and(|mounts| {
+        mounts.lines().any(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            fields.len() > 6 && fields[4] == marker && fields[5].split(',').any(|v| v == "ro")
+        })
+    });
+    mounted_read_only
+        && value["container_admin"] == true
+        && value["command_boundary"] == "container"
+}
+pub fn command_isolation_for(config: &Config) -> Option<&'static str> {
+    if config.command_boundary == crate::config::CommandBoundary::Container {
+        return container_boundary_available().then_some("installation-container");
+    }
+    command_isolation()
 }
 pub fn command_isolation() -> Option<&'static str> {
     if cfg!(all(windows, feature = "windows-appcontainer")) {
@@ -320,15 +368,43 @@ pub async fn call(c: &Config, cwd: &Path, name: &str, args: &Value) -> Result<Va
     }
 }
 #[cfg(not(windows))]
-struct ProcessGroup(u32);
+struct ProcessGroup {
+    id: u32,
+    container_admin: bool,
+}
 #[cfg(not(windows))]
 impl Drop for ProcessGroup {
     fn drop(&mut self) {
         #[cfg(not(unix))]
-        let _ = self.0;
+        let _ = self.id;
+        #[cfg(target_os = "linux")]
+        if self.container_admin {
+            // Container-local sudo children can change uid. The unprivileged
+            // runtime cannot kill those itself. Reap this command's group with
+            // the installation's sudo, bounded even if sudo is misconfigured.
+            // The admin image disables sudo's extra PTY/process group.
+            let _ = std::process::Command::new("/usr/bin/timeout")
+                .args([
+                    "--kill-after=1",
+                    "1",
+                    "/usr/bin/sudo",
+                    "-n",
+                    "/usr/bin/kill",
+                    "-KILL",
+                    "--",
+                ])
+                .arg(format!("-{}", self.id))
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = self.container_admin;
         #[cfg(unix)]
         unsafe {
-            libc::kill(-(self.0 as i32), libc::SIGKILL);
+            libc::kill(-(self.id as i32), libc::SIGKILL);
         }
     }
 }
@@ -375,7 +451,7 @@ async fn run(c: &Config, cwd: &Path, args: &Value) -> Result<Value> {
         "Inherited command networking is currently supported on Linux only"
     );
     ensure!(
-        command_isolation().is_some(),
+        command_isolation_for(c).is_some(),
         "Isolated commands require Linux bubblewrap or macOS Seatbelt; no unrestricted fallback"
     );
     let command = args["command"].as_str().context("Missing command")?;
@@ -414,96 +490,129 @@ async fn run(c: &Config, cwd: &Path, args: &Value) -> Result<Value> {
     #[cfg(not(target_os = "macos"))]
     let account = isolated_account()?;
     #[cfg(not(target_os = "macos"))]
-    let mut cmd = tokio::process::Command::new("/usr/bin/bwrap");
+    let mut cmd = tokio::process::Command::new(
+        if c.command_boundary == crate::config::CommandBoundary::Container {
+            command
+        } else {
+            "/usr/bin/bwrap"
+        },
+    );
     #[cfg(not(target_os = "macos"))]
     {
-        cmd.env_clear().args([
-            "--unshare-all",
-            "--die-with-parent",
-            "--new-session",
-            "--cap-drop",
-            "ALL",
-            "--ro-bind",
-            "/usr",
-            "/usr",
-        ]);
-        for name in ["bin", "sbin", "lib", "lib64"] {
-            let p = PathBuf::from(format!("/{name}"));
-            if p.exists() {
-                if p.is_symlink() {
-                    cmd.arg("--symlink").arg(std::fs::read_link(&p)?).arg(&p);
-                } else {
-                    cmd.arg("--ro-bind").arg(&p).arg(&p);
+        if c.command_boundary == crate::config::CommandBoundary::Container {
+            ensure!(
+                container_boundary_available()
+                    && c.command_network == crate::config::CommandNetwork::Inherit,
+                "Container command boundary is unavailable"
+            );
+            cmd.env_clear()
+                .env("HOME", "/home/agent")
+                .env(
+                    "PATH",
+                    "/home/agent/.local/bin:/usr/local/bin:/usr/bin:/bin",
+                )
+                .env("LANG", "C.UTF-8")
+                .env("AGENT_BROWSER_SOCKET_DIR", "/tmp/ab")
+                .current_dir(&cwd);
+            for name in ["PLAYWRIGHT_BROWSERS_PATH", "AGENT_BROWSER_EXECUTABLE_PATH"] {
+                if let Ok(value) = std::env::var(name) {
+                    cmd.env(name, value);
                 }
             }
-        }
-        cmd.args([
-            "--proc",
-            "/proc",
-            "--dev",
-            "/dev",
-            "--tmpfs",
-            "/tmp",
-            "--setenv",
-            "HOME",
-            "/tmp",
-            "--setenv",
-            "PATH",
-            "/usr/local/bin:/usr/bin:/bin",
-            "--setenv",
-            "LANG",
-            "C.UTF-8",
-        ]);
-        for name in ["passwd", "group"] {
-            cmd.arg("--ro-bind")
-                .arg(account.path().join(name))
-                .arg(format!("/etc/{name}"));
-        }
-        // Debian-family toolchains use these aliases from /usr/bin. Preserve
-        // only aliases resolving into the already exposed system tool tree;
-        // never mount the entire /etc directory or arbitrary alternatives.
-        for name in ["cc", "c++", "cpp", "awk", "pkg-config"] {
-            let alias = PathBuf::from(format!("/etc/alternatives/{name}"));
-            if let Ok(target) = std::fs::canonicalize(&alias)
-                && target.starts_with("/usr")
-                && target.is_file()
-            {
-                cmd.arg("--symlink").arg(target).arg(&alias);
-            }
-        }
-        if c.command_network == crate::config::CommandNetwork::Inherit {
-            // Keep filesystem, PID, environment and user isolation. Only the
-            // network namespace is inherited (including an outer container's
-            // network policy). Never bind /etc or a credential directory.
-            cmd.arg("--share-net");
-            for file in [
-                "/etc/resolv.conf",
-                "/etc/hosts",
-                "/etc/nsswitch.conf",
-                "/etc/ssl/certs/ca-certificates.crt",
-                "/etc/pki/tls/certs/ca-bundle.crt",
-                "/etc/ssl/ca-bundle.pem",
-            ] {
-                if Path::new(file).is_file() {
-                    cmd.arg("--ro-bind").arg(file).arg(file);
+        } else {
+            cmd.env_clear().args([
+                "--unshare-all",
+                "--die-with-parent",
+                "--new-session",
+                "--cap-drop",
+                "ALL",
+                "--ro-bind",
+                "/usr",
+                "/usr",
+            ]);
+            for name in ["bin", "sbin", "lib", "lib64"] {
+                let p = PathBuf::from(format!("/{name}"));
+                if p.exists() {
+                    if p.is_symlink() {
+                        cmd.arg("--symlink").arg(std::fs::read_link(&p)?).arg(&p);
+                    } else {
+                        cmd.arg("--ro-bind").arg(&p).arg(&p);
+                    }
                 }
             }
+            cmd.args([
+                "--proc",
+                "/proc",
+                "--dev",
+                "/dev",
+                "--tmpfs",
+                "/tmp",
+                "--setenv",
+                "HOME",
+                "/tmp",
+                "--setenv",
+                "PATH",
+                "/usr/local/bin:/usr/bin:/bin",
+                "--setenv",
+                "LANG",
+                "C.UTF-8",
+            ]);
+            for name in ["passwd", "group"] {
+                cmd.arg("--ro-bind")
+                    .arg(account.path().join(name))
+                    .arg(format!("/etc/{name}"));
+            }
+            // Debian-family toolchains use these aliases from /usr/bin. Preserve
+            // only aliases resolving into the already exposed system tool tree;
+            // never mount the entire /etc directory or arbitrary alternatives.
+            for name in ["cc", "c++", "cpp", "awk", "pkg-config"] {
+                let alias = PathBuf::from(format!("/etc/alternatives/{name}"));
+                if let Ok(target) = std::fs::canonicalize(&alias)
+                    && target.starts_with("/usr")
+                    && target.is_file()
+                {
+                    cmd.arg("--symlink").arg(target).arg(&alias);
+                }
+            }
+            if c.command_network == crate::config::CommandNetwork::Inherit {
+                // Keep filesystem, PID, environment and user isolation. Only the
+                // network namespace is inherited (including an outer container's
+                // network policy). Never bind /etc or a credential directory.
+                cmd.arg("--share-net");
+                for file in [
+                    "/etc/resolv.conf",
+                    "/etc/hosts",
+                    "/etc/nsswitch.conf",
+                    "/etc/ssl/certs/ca-certificates.crt",
+                    "/etc/pki/tls/certs/ca-bundle.crt",
+                    "/etc/ssl/ca-bundle.pem",
+                ] {
+                    if Path::new(file).is_file() {
+                        cmd.arg("--ro-bind").arg(file).arg(file);
+                    }
+                }
+            }
+            for root in &roots {
+                cmd.arg("--bind").arg(root).arg(root);
+            }
+            cmd.arg("--chdir").arg(&cwd).arg("--");
+            cmd.arg(command);
         }
-        for root in &roots {
-            cmd.arg("--bind").arg(root).arg(root);
-        }
-        cmd.arg("--chdir").arg(&cwd).arg("--");
     }
+    #[cfg(target_os = "macos")]
+    cmd.arg(command);
     #[cfg(unix)]
     cmd.process_group(0);
-    cmd.arg(command)
-        .args(arguments)
+    cmd.args(arguments)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     let mut child = cmd.spawn().context("Unable to start isolated command")?;
-    let guard = ProcessGroup(child.id().context("Command failed to start")?);
+    let guard = ProcessGroup {
+        id: child.id().context("Command failed to start")?,
+        container_admin: c.command_boundary == crate::config::CommandBoundary::Container,
+    };
     let out = child.stdout.take().unwrap();
     let err = child.stderr.take().unwrap();
     let wait = async {

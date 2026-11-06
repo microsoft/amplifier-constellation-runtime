@@ -30,6 +30,10 @@ pub struct Config {
     /// Owner-controlled command networking, independent of filesystem grants.
     #[serde(default)]
     pub command_network: CommandNetwork,
+    /// Explicit owner choice to rely on an enclosing installation container.
+    /// Workspace isolation remains the default on every platform.
+    #[serde(default)]
+    pub command_boundary: CommandBoundary,
     /// Compact completed turns for model requests; full history stays saved.
     #[serde(default)]
     pub context: crate::context::Policy,
@@ -56,6 +60,17 @@ pub enum CommandNetwork {
     /// Inherit the enclosing Linux network namespace and its firewall policy.
     /// This does not itself restrict access to public internet addresses.
     Inherit,
+}
+#[derive(
+    Clone, Copy, Default, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandBoundary {
+    #[default]
+    Workspace,
+    /// Commands may administer this installation's container. Requires an
+    /// installer-owned read-only marker, never inferred from persona text.
+    Container,
 }
 #[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -271,6 +286,7 @@ impl Config {
             },
             mode: Mode::Ask,
             command_network: CommandNetwork::Isolated,
+            command_boundary: CommandBoundary::Workspace,
             context: Default::default(),
             allowed_mcp_mutations: vec![],
             trusted_mcp_readonly_urls: vec![],
@@ -289,6 +305,16 @@ impl Config {
             self.command_network == CommandNetwork::Isolated || cfg!(target_os = "linux"),
             "Inherited command networking is currently supported on Linux only"
         );
+        if self.command_boundary == CommandBoundary::Container {
+            ensure!(
+                self.command_network == CommandNetwork::Inherit,
+                "Container commands must explicitly inherit the container network policy"
+            );
+            ensure!(
+                crate::tools::container_boundary_available(),
+                "Container commands require an installer-enabled, read-only container boundary marker"
+            );
+        }
         self.context.validate()?;
         crate::decisions::validate_backends(&self.decisions)?;
         self.provider.native.validate(self.provider.kind)?;
