@@ -455,7 +455,7 @@ impl Transport {
                 if id.is_none() {
                     return Ok(Value::Null);
                 }
-                while let Some(v) = crate::rpc::frame(output).await? {
+                while let Some(v) = read_mcp_frame(output).await? {
                     if v.get("method").is_some() {
                         if let Some(callback) = v.get("id") {
                             input.write_all(format!("{}\n",json!({"jsonrpc":"2.0","id":callback,"error":{"code":-32601,"message":"MCP client capability not offered"}})).as_bytes()).await?;
@@ -471,4 +471,28 @@ impl Transport {
             }
         }
     }
+}
+
+async fn read_mcp_frame<R: tokio::io::AsyncBufRead + Unpin>(r: &mut R) -> Result<Option<Value>> {
+    use tokio::io::AsyncBufReadExt;
+    let mut bytes = Vec::new();
+    loop {
+        let buf = r.fill_buf().await?;
+        if buf.is_empty() {
+            ensure!(bytes.is_empty(), "Incomplete MCP frame");
+            return Ok(None);
+        }
+        let n = buf
+            .iter()
+            .position(|b| *b == b'\n')
+            .map(|n| n + 1)
+            .unwrap_or(buf.len());
+        ensure!(bytes.len() + n <= 24 * 1024 * 1024, "MCP frame too large");
+        bytes.extend_from_slice(&buf[..n]);
+        r.consume(n);
+        if bytes.last() == Some(&b'\n') {
+            break;
+        }
+    }
+    Ok(Some(serde_json::from_slice(&bytes)?))
 }
