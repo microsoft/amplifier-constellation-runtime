@@ -41,6 +41,7 @@ jobs:
           COMMAND_TEST_TOKEN: must-not-reach-the-command
       - run: cargo build --locked
       - run: python tests/steering.py
+      - run: python tests/native_context.py
       - run: python tests/steering_fallback.py
       - run: python tests/steering_pause.py
       - run: python tests/protocol.py

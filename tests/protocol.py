@@ -85,6 +85,8 @@ class Tests(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory();self.home=Path(self.tmp.name)/'state';self.work=Path(self.tmp.name)/'work';self.clients=[]
         subprocess.run([str(BINARY),'--home',str(self.home),'init','--workspace',str(self.work),'--model','fixture'],check=True,stdout=subprocess.DEVNULL)
         cfg=json.loads((self.home/'runtime.json').read_text());cfg['provider'].update(endpoint=f'http://127.0.0.1:{self.server.server_port}/responses',api_key_env='RUNTIME_FIXTURE_KEY',reasoning_effort=None);(self.home/'runtime.json').write_text(json.dumps(cfg))
+        cfg['context']['provider_compaction']=False
+        (self.home/'runtime.json').write_text(json.dumps(cfg))
     def tearDown(self):
         for c in self.clients:c.close()
         self.tmp.cleanup()

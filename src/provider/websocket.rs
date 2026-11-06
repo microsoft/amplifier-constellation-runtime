@@ -75,10 +75,10 @@ impl Client {
         let (socket, _) = tokio::time::timeout(
             std::time::Duration::from_secs(15),
             tokio_tungstenite::connect_async_tls_with_config(
-                request,
+                request.clone(),
                 Some(config),
                 false,
-                connector,
+                connector.clone(),
             ),
         )
         .await
@@ -91,9 +91,13 @@ impl Client {
         let (tx, rx) = mpsc::channel(1);
         let max = provider.config.limits.max_model_calls;
         let provider_context_limit = provider.config.limits.max_context_bytes;
+        let idle = std::time::Duration::from_secs(provider.config.limits.provider_idle_seconds);
         let task = tokio::spawn(async move {
             let mut driver = Driver {
                 socket,
+                connection_request: request,
+                connector,
+                opened_at: tokio::time::Instant::now(),
                 requests: rx,
                 peer,
                 inbox: inbox.clone(),
@@ -101,6 +105,7 @@ impl Client {
                 waiter: None,
                 ready: VecDeque::new(),
                 history: vec![],
+                window_start: 0,
                 id: None,
                 running: false,
                 awaiting_created: false,
@@ -120,6 +125,7 @@ impl Client {
                 seen_accepted: HashMap::new(),
                 failure_stage: "connect",
                 failure_category: "transport",
+                idle,
             };
             if let Err(e) = driver.run().await {
                 // Provider bodies, source text, URLs and credentials never enter
@@ -161,10 +167,14 @@ struct Pending {
     remote_id: Option<String>,
 }
 struct Driver {
+    idle: std::time::Duration,
     failure_stage: &'static str,
     failure_category: &'static str,
     messages: super::identity::Messages,
     socket: Socket,
+    connection_request: tokio_tungstenite::tungstenite::http::Request<()>,
+    connector: Option<Connector>,
+    opened_at: tokio::time::Instant,
     requests: mpsc::Receiver<Request>,
     peer: Peer,
     inbox: Arc<Inbox>,
@@ -172,6 +182,7 @@ struct Driver {
     waiter: Option<oneshot::Sender<Result<Value>>>,
     ready: VecDeque<Value>,
     history: Vec<Value>,
+    window_start: usize,
     id: Option<String>,
     running: bool,
     awaiting_created: bool,
@@ -206,15 +217,19 @@ fn failure_code(error: &anyhow::Error) -> &'static str {
         }
         "Model WebSocket closed; no pending input was replayed" => "connection_closed",
         "Logical turn model-call budget exhausted" => "model_call_budget",
+        "Model WebSocket stopped answering; no pending input was replayed" => "transport_idle",
         _ => "request_failed",
     }
 }
 impl Driver {
     async fn send(&mut self, value: Value) -> Result<()> {
-        self.socket
-            .send(Message::Text(value.to_string().into()))
-            .await
-            .context("Model WebSocket send failed; outcome may be unknown")
+        tokio::time::timeout(
+            self.idle,
+            self.socket.send(Message::Text(value.to_string().into())),
+        )
+        .await
+        .context("Model WebSocket send timed out; outcome may be unknown")?
+        .context("Model WebSocket send failed; outcome may be unknown")
     }
     async fn fits(&self, inputs: &[Input], history: &[Value]) -> Result<bool> {
         let mut all = history.to_vec();
@@ -246,7 +261,10 @@ impl Driver {
         if inputs.is_empty() {
             return Ok(());
         }
-        if !self.fits(&inputs, &self.history).await? {
+        if !self
+            .fits(&inputs, &self.history[self.window_start..])
+            .await?
+        {
             return Ok(());
         }
         let wire = history::responses(&inputs.iter().map(|i| i.item.clone()).collect::<Vec<_>>());
@@ -310,16 +328,17 @@ impl Driver {
             }
         }
         if let Some(id) = &self.id {
-            if all.starts_with(&self.history) {
+            let current = &self.history[self.window_start..];
+            if all.starts_with(current) {
                 body["previous_response_id"] = json!(id);
-                body["input"] = json!(&all[self.history.len()..]);
+                body["input"] = json!(&all[current.len()..]);
             } else if self.pending.is_some() {
                 // Refreshed source snapshots and compaction can change an old
                 // prefix without changing the active work. Finish the existing
                 // chain with only the engine's new local observations; never
                 // replay its input, assistant output, or completed tool calls.
                 let observations = history::responses(&request.continuation_items);
-                all = self.history.clone();
+                all = self.history[self.window_start..].to_vec();
                 all.extend(observations.iter().cloned());
                 let pending = history::responses(
                     &self
@@ -347,7 +366,47 @@ impl Driver {
                 self.id = None;
             }
         }
+        // Responses WebSockets have a bounded lifetime. Rotate only between
+        // settled responses, never while a steering successor may be running.
+        // Send the canonical context, not a replay of a possibly accepted call.
+        if self.opened_at.elapsed() >= std::time::Duration::from_secs(55 * 60)
+            && !self.running
+            && !self.awaiting_created
+            && !self.auto_wait
+            && self.pending.is_none()
+        {
+            let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+                .max_message_size(Some(24 * 1024 * 1024))
+                .max_frame_size(Some(24 * 1024 * 1024));
+            let (socket, _) = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                tokio_tungstenite::connect_async_tls_with_config(
+                    self.connection_request.clone(),
+                    Some(config),
+                    false,
+                    self.connector.clone(),
+                ),
+            )
+            .await
+            .context("Settled model connection rotation timed out")?
+            .map_err(|_| {
+                anyhow::anyhow!("Settled model connection rotation failed; no work was replayed")
+            })?;
+            let _ = self.socket.close(None).await;
+            self.socket = socket;
+            self.opened_at = tokio::time::Instant::now();
+            self.id = None;
+            body.as_object_mut().unwrap().remove("previous_response_id");
+            body["input"] = json!(all);
+            self.inbox.store.event(
+                &self.inbox.sid,
+                Some(&self.inbox.turn),
+                "provider.connection.rotated",
+                json!({"reason":"settled_lifetime_boundary"}),
+            )?;
+        }
         self.history = all;
+        self.window_start = 0;
         body.as_object_mut().unwrap().remove("stream");
         body.as_object_mut().unwrap().remove("background");
         body["type"] = json!("response.create");
@@ -374,6 +433,12 @@ impl Driver {
                     return Ok(());
                 }
                 self.seen_created.insert(id.clone(), parent);
+                self.inbox.store.event(
+                    &self.inbox.sid,
+                    Some(&self.inbox.turn),
+                    "provider.response.created",
+                    json!({"response_id":id,"source":"responses_websocket"}),
+                )?;
                 self.messages = super::identity::Messages::default();
                 self.created += 1;
                 ensure!(
@@ -480,6 +545,14 @@ impl Driver {
                 bail!("Model rejected steering; input retained, not retried automatically")
             }
             "response.output_item.added" | "response.output_item.done" => {
+                if event["type"] == "response.output_item.added"
+                    && event["item"]["type"] == "compaction"
+                    && let Some(id) = event["item"]["id"].as_str()
+                {
+                    self.peer
+                        .compaction(&self.inbox.sid, &format!("server-{id}"), "in_progress")
+                        .await?;
+                }
                 self.messages.observe(&event);
             }
             "response.output_text.delta" | "response.refusal.delta" => {
@@ -511,6 +584,9 @@ impl Driver {
                 let output = response["output"]
                     .as_array()
                     .context("Response output missing")?;
+                if let Some(index) = output.iter().rposition(|v| v["type"] == "compaction") {
+                    self.window_start = self.history.len() + index;
+                }
                 self.history.extend(history::responses(output));
                 self.needs_tools = output.iter().any(|v| {
                     matches!(
@@ -548,17 +624,30 @@ impl Driver {
         Ok(())
     }
     async fn run(&mut self) -> Result<()> {
+        // A live connection may legitimately spend many minutes thinking or
+        // compacting. Ping/pong detects a dead peer without imposing a response
+        // completion deadline. It never starts/replays a model request.
+        let mut last_received = tokio::time::Instant::now();
+        let heartbeat_every = (self.idle / 3).min(std::time::Duration::from_secs(30));
+        let mut heartbeat = tokio::time::interval(heartbeat_every);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        heartbeat.tick().await;
         loop {
             tokio::select! {
              biased;
              _=self.cancel.cancelled()=>{let _=self.socket.close(None).await;return Ok(())},
-             request=self.requests.recv()=>{let Some(request)=request else {return Ok(())};self.failure_stage="request";self.failure_category="runtime_boundary";self.request(request).await?;},
-             event=self.socket.next()=>{self.failure_stage="receive";self.failure_category="transport";match event.context("Model WebSocket closed before work settled")?.context("Model WebSocket interrupted")? {
+             request=self.requests.recv()=>{let Some(request)=request else {return Ok(())};self.failure_stage="request";self.failure_category="runtime_boundary";let opened=self.opened_at;self.request(request).await?;if self.opened_at!=opened{last_received=self.opened_at;}},
+             event=self.socket.next()=>{last_received=tokio::time::Instant::now();self.failure_stage="receive";self.failure_category="transport";match event.context("Model WebSocket closed before work settled")?.context("Model WebSocket interrupted")? {
               Message::Text(text)=>{self.total_bytes+=text.len();ensure!(self.total_bytes<=128*1024*1024,"Logical turn model stream exceeded byte budget");let event:Value=serde_json::from_str(&text).context("Invalid model WebSocket event")?;self.failure_stage="event";self.failure_category=if matches!(event["type"].as_str(),Some("response.failed"|"error"|"response.steer.failed")){"provider"}else{"protocol"};self.event(event).await?;},
               Message::Ping(data)=>self.socket.send(Message::Pong(data)).await?,
               Message::Close(_)=>bail!("Model WebSocket closed; no pending input was replayed"),
               Message::Binary(_)=>bail!("Unexpected binary model event"),_=>{}
              }},
+             _=heartbeat.tick()=>{
+                self.failure_stage="liveness";self.failure_category="transport";
+                ensure!(last_received.elapsed()<self.idle,"Model WebSocket stopped answering; no pending input was replayed");
+                tokio::time::timeout(self.idle,self.socket.send(Message::Ping(Vec::new().into()))).await.context("Model WebSocket heartbeat send timed out")??;
+             },
              _=self.inbox.changed.notified()=>{self.failure_stage="steering";self.failure_category="input_delivery";self.steer().await?;},
             }
         }

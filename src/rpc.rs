@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -15,6 +15,7 @@ type Waiters = Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>;
 #[derive(Clone)]
 pub struct Peer {
     pub output: mpsc::Sender<Value>,
+    pub compaction_supported: Arc<AtomicBool>,
     pending: Waiters,
     next: Arc<AtomicU64>,
 }
@@ -37,6 +38,7 @@ impl Peer {
     pub fn new(output: mpsc::Sender<Value>) -> Self {
         Self {
             output,
+            compaction_supported: Arc::new(AtomicBool::new(false)),
             pending: Arc::new(Mutex::new(HashMap::new())),
             next: Arc::new(AtomicU64::new(1)),
         }
@@ -46,6 +48,14 @@ impl Peer {
             .await
             .context("Client output stalled")?
             .context("Client disconnected")
+    }
+    pub async fn compaction(&self, sid: &str, id: &str, status: &str) -> Result<()> {
+        let update = if self.compaction_supported.load(Ordering::SeqCst) {
+            json!({"sessionUpdate":"compaction_update","compactionId":id,"status":status})
+        } else {
+            json!({"sessionUpdate":if status=="in_progress"{"tool_call"}else{"tool_call_update"},"toolCallId":id,"title":"Compacting conversation","kind":"think","status":status})
+        };
+        self.update(sid, update).await
     }
     pub async fn update(&self, sid: &str, update: Value) -> Result<()> {
         self.send(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":update}})).await

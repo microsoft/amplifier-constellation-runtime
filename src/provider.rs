@@ -1,3 +1,4 @@
+mod compaction;
 mod history;
 mod identity;
 mod stream;
@@ -18,6 +19,8 @@ pub struct Provider {
     config: Config,
     key: Option<String>,
     websocket: Option<websocket::Client>,
+    compactions: usize,
+    context_tokens: u64,
     pub(crate) boundary_inputs: Vec<crate::steering::Input>,
     /// Local observations produced since the last provider response. These are
     /// separate from the refreshed/compacted projection of earlier history.
@@ -61,7 +64,9 @@ impl Provider {
         let mut builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(std::time::Duration::from_secs(15))
-            .timeout(std::time::Duration::from_secs(config.limits.turn_seconds));
+            .read_timeout(std::time::Duration::from_secs(
+                config.limits.provider_idle_seconds,
+            ));
         if let Some(path) = &p.tls_ca_file {
             for cert in reqwest::Certificate::from_pem_bundle(&std::fs::read(path)?)? {
                 builder = builder.add_root_certificate(cert);
@@ -72,6 +77,8 @@ impl Provider {
             config: config.clone(),
             key,
             websocket: None,
+            compactions: 0,
+            context_tokens: 0,
             boundary_inputs: vec![],
             continuation_items: vec![],
         })
@@ -92,8 +99,12 @@ impl Provider {
         }
         if p.kind == ProviderKind::Anthropic {
             request = request.header("anthropic-version", "2023-06-01");
-            if !p.native.anthropic_betas.is_empty() {
-                request = request.header("anthropic-beta", p.native.anthropic_betas.join(","));
+            let mut betas = p.native.anthropic_betas.clone();
+            if self.native_context() && !betas.iter().any(|b| b == "compact-2026-09-04") {
+                betas.push("compact-2026-09-04".into());
+            }
+            if !betas.is_empty() {
+                request = request.header("anthropic-beta", betas.join(","));
             }
         }
         if let Some(key) = &self.key {
@@ -146,6 +157,9 @@ impl Provider {
                     b["include"] = json!(["reasoning.encrypted_content"]);
                     b["parallel_tool_calls"] = json!(false);
                 }
+                if self.native_context() {
+                    b["context_management"] = json!([{"type":"compaction","compact_threshold":self.config.context.compact_threshold_tokens}]);
+                }
                 if let Some(e) = &p.reasoning_effort {
                     b["reasoning"] = json!({"effort":e});
                 }
@@ -157,6 +171,10 @@ impl Provider {
             ProviderKind::Anthropic => {
                 let ts:Vec<_>=tools.iter().map(|t|json!({"name":t["name"],"description":t["description"],"input_schema":t["parameters"]})).collect();
                 let mut b = json!({"model":p.model,"system":instructions,"messages":history::messages(p.kind,items)?,"tools":ts,"max_tokens":max,"stream":true});
+                if self.config.context.prompt_caching {
+                    b["system"] = json!([{"type":"text","text":instructions,"cache_control":{"type":"ephemeral"}}]);
+                    b["cache_control"] = json!({"type":"ephemeral"});
+                }
                 if let Some(e) = &p.reasoning_effort {
                     b["thinking"] = json!({"type":"adaptive"});
                     b["output_config"] = json!({"effort":e});
@@ -283,6 +301,9 @@ impl Provider {
         let mut result = self
             .complete_inner(instructions, items, tools, peer, cancel, inbox.clone())
             .await;
+        if let Ok(response) = &result {
+            self.context_tokens = compaction::context_tokens(&response["usage"]);
+        }
         if result.is_err()
             && (self.config.provider.kind != ProviderKind::Openai || self.websocket.is_none())
         {

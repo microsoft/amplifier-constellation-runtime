@@ -10,26 +10,71 @@ No transcript is copied into the instance database. Replacing the native store c
 
 ## Working context and compaction
 
-Version 0.4 separates the saved transcript from the model's current working context. Every user message, public assistant output, tool intent/result, and provider continuation record remains in the private session history. Resuming a session still replays its full public history to ACP clients.
+The saved transcript stays intact. Model requests use a separate working window.
+OpenAI Responses uses server compaction during a live WebSocket chain, and the
+standalone compact endpoint before starting a large new chain. The entire
+standalone response is the canonical next window; only a server compaction item
+may replace an older prefix. Steering successors and pending tool results remain
+on their original chain. Provider-signed or opaque records never enter public
+history or status labels.
 
-When a request would exceed `limits.max_context_bytes`, the engine builds a smaller model view. It replaces an old, completed prefix with an **extractive archive note**, then keeps recent turns and the whole active turn. This is an intentionally incomplete excerpt with item ranges and a SHA-256 digest, not a claim that all old facts have been semantically summarized. An active tool call and its result are never separated. Provider-specific continuation remains intact within the retained turns, including signed/opaque fields where required.
+Anthropic uses capability-checked on-demand compaction (`compact-2026-09-04`).
+The exact signed block is retained with the unchanged system/tools/settings.
+Compaction is applied only after its terminal success, including streamed
+responses. Unsupported account/model routes fail explicitly with original
+history preserved; disable `provider_compaction` to select the extractive
+fallback. This release uses foreground compaction; it does not race background
+summaries against an evolving transcript.
 
-The note tells the model how to request original public messages using `session_history`. That read-only tool supports text search, item offsets, and byte offsets for exact bounded retrieval. It accesses only the current session. It cannot reveal private reasoning or opaque provider records. Cross-conversation retrieval remains a separately authorized MCP capability provided by the host or experience.
-
-Each distinct compacted prefix records a checkpoint and a `context.compacted` event with its provenance. The database records what was omitted from a particular model view without deleting or rewriting the transcript. Repeated model calls do not create duplicate checkpoints for the same prefix.
-
-Defaults are:
+Checkpoints are bound to the original prefix, provider and settings hashes.
+They survive restart but cannot be applied to a changed prefix. Other providers
+use a bounded extractive archive note with item ranges and a digest, retaining
+the current tool continuation. The `session_history` tool retrieves original
+public messages when more detail is needed. No compaction grants authority or
+asserts that work is complete.
 
 ```json
 {
+  "limits": {"turn_seconds": 0, "provider_idle_seconds": 300},
   "context": {
     "auto_compact": true,
+    "provider_compaction": true,
+    "compact_threshold_tokens": 100000,
+    "max_compactions_per_turn": 4,
+    "prompt_caching": true,
     "retain_recent_turns": 3,
     "archive_note_bytes": 8192
   }
 }
 ```
 
-The preferred recent-turn count may be reduced to fit the budget; the current turn is always retained. If that turn, the instructions, or the tool definitions alone exceed the budget, execution stops with an explicit error. There is no silent active-turn truncation, automatic provider switch, or inference that an archived task is complete. Binary media is measured separately from text context.
+A zero whole-turn timeout allows healthy long work. It does not remove model-call,
+tool-operation, output or assignment limits. Transport inactivity is a separate
+setting; WebSockets use ping/pong and HTTP uses read inactivity. WebSocket
+connections rotate before their service lifetime only at a settled response
+boundary. Ambiguous calls are never retried automatically.
 
-This mechanism improves bounded long-session execution. It does not establish cross-agent shared memory, durable commitments, or a semantic memory quality guarantee.
+Stable instructions and deterministically ordered tools preserve cache prefixes.
+Anthropic marks the stable system prefix and requests automatic caching; OpenAI
+uses its automatic prefix cache. Credential values are never part of diagnostics.
+
+## Execution measurements
+
+`agent-runtime --home /absolute/engine diagnostics` returns content-free counts,
+model-step latency, latest working-context size, cache usage and explicit stop
+reasons. Original transcript bytes and model-window bytes are separate. Counts
+cover the stated stored-event sample; engine model steps, provider-created
+responses and usage notifications are different measurements. Missing usage is
+not zero cost. Compaction usage is separately recorded in `context.compacted`.
+No monetary savings are inferred from cache tokens or reduced input bytes.
+
+The Instance dashboard exposes the same report through
+`GET /api/v1/native-observations` for an authorized observer. Model connection
+and context settings are available in advanced engine settings and the normal
+configuration API/CLI.
+
+Implementation guidance: [OpenAI compaction](https://developers.openai.com/api/docs/guides/compaction),
+[Responses WebSockets](https://developers.openai.com/api/docs/guides/websocket-mode),
+[steering](https://developers.openai.com/api/docs/guides/steering),
+[Anthropic on-demand compaction](https://platform.claude.com/docs/en/build-with-claude/compaction-on-demand),
+and [prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching).

@@ -20,7 +20,13 @@ class ResponsesWebSocketMixin:
         if n>24*1024*1024:raise ValueError('fixture frame limit')
         mask=self.rfile.read(4) if h[1]&128 else b'\0'*4
         raw=self.rfile.read(n)
-        return json.loads(bytes(v^mask[i%4] for i,v in enumerate(raw)))
+        payload=bytes(v^mask[i%4] for i,v in enumerate(raw))
+        if h[0]&15==9:
+            if not getattr(self.server,'ignore_pings',False):
+                self.wfile.write(bytes([0x8a,len(payload)])+payload);self.wfile.flush()
+            return self._ws_read()
+        if h[0]&15==10:return self._ws_read()
+        return json.loads(payload)
     def do_GET(self):
         if self.headers.get('Upgrade','').lower()!='websocket':return super().do_GET()
         self.protocol_version='HTTP/1.1'
