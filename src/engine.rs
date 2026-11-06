@@ -126,7 +126,7 @@ impl Turn<'_> {
                 json!({"unavailable":self.mcp.unavailable}),
             )?;
         }
-        let mut definitions = tools::definitions_for_network(self.config.command_network);
+        let mut definitions = tools::definitions_for_config(self.config);
         if self.config.client_form_elicitation {
             definitions.push(crate::elicitation::definition());
         }
