@@ -46,7 +46,7 @@ dependencies = [
 
 [[package]]
 name = "agent-runtime"
-version = "0.11.2"
+version = "0.12.0"
 dependencies = [
  "amplifier-acp-connection",
  "anyhow",
@@ -84,6 +84,7 @@ checksum = "e9d4ee0d472d1cd2e28c97dfa124b3d8d992e10eb0a035f33f5d12e3a177ba3b"
 [[package]]
 name = "amplifier-acp-connection"
 version = "0.1.0"
+source = "git+https://github.com/microsoft/amplifier-constellation?rev=e0d6a03fd342b295d349b633d400376efbbe2c40#e0d6a03fd342b295d349b633d400376efbbe2c40"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
