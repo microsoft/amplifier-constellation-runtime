@@ -156,6 +156,39 @@ fn provider_binding_survives_restart_and_allows_credential_rotation_only() {
     );
     assert_eq!(reopened.load(&a.id).unwrap().items, a.items);
 }
+
+#[test]
+fn provider_identity_is_stable_across_json_features_and_keeps_both_released_bindings() {
+    let (_dir, mut c, s) = setup();
+    c.provider.model = "gpt-6.1-sol".into();
+    let canonical = "2fcee749df889483a81952c1a53c7d6eb980a6f8ac369d13c4eed44502a72e28";
+    let sdk_era = "9d50244880a338601f6fe5950ff6a320adb850a05e7ed0ed1bb34a2a47cbef92";
+    assert_eq!(c.provider.fingerprint(), canonical);
+    for key in [canonical, sdk_era] {
+        let a = s.create(c.workspace.clone(), Mode::Ask).unwrap();
+        s.bind_provider(&a.id, key, false).unwrap();
+        let reopened = Store::open(s.home.clone()).unwrap();
+        reopened
+            .bind_configured_provider(&a.id, &c.provider)
+            .unwrap();
+        // Acceptance does not rewrite even the historical key.
+        reopened.bind_provider(&a.id, key, false).unwrap();
+        let mut other = c.provider.clone();
+        other.api_key_env = "ROTATED_CREDENTIAL".into();
+        reopened.bind_configured_provider(&a.id, &other).unwrap();
+        other.model = "another-model".into();
+        assert!(reopened.bind_configured_provider(&a.id, &other).is_err());
+    }
+    // Explicit account registration remains part of OAuth continuation identity.
+    c.provider.auth = agent_runtime::config::ProviderAuth::Chatgpt;
+    c.provider.chatgpt_credentials_file = Some("/private/account-one.json".into());
+    let key = c.provider.fingerprint();
+    let a = s.create(c.workspace.clone(), Mode::Ask).unwrap();
+    s.bind_configured_provider(&a.id, &c.provider).unwrap();
+    c.provider.chatgpt_credentials_file = Some("/private/account-two.json".into());
+    assert_ne!(key, c.provider.fingerprint());
+    assert!(s.bind_configured_provider(&a.id, &c.provider).is_err());
+}
 #[test]
 fn legacy_history_schema_is_migrated_without_rewriting_transcripts() {
     let dir = tempfile::tempdir().unwrap();

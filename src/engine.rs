@@ -28,11 +28,20 @@ impl Turn<'_> {
         // Earlier uncertain submissions remain quarantined in the inbox. A new
         // request is independently authorized, not a retry of those submissions.
         let uncertainty = self.store.input_uncertainty(&self.session.id)?;
-        self.store.bind_provider(
-            &self.session.id,
-            &self.config.provider.fingerprint(),
-            self.config.provider.kind == crate::config::ProviderKind::Openai,
-        )?;
+        if let Err(error) = self
+            .store
+            .bind_configured_provider(&self.session.id, &self.config.provider)
+        {
+            if error.is::<crate::store::ProviderIdentityMismatch>() {
+                self.store.event(
+                    &self.session.id,
+                    None,
+                    "turn.rejected",
+                    json!({"stage":"provider_binding","reason":"provider_identity_mismatch","input_recorded":false,"model_started":false}),
+                )?;
+            }
+            return Err(error);
+        }
         // Reload under the file lock: another process may have completed a turn
         // since this connection loaded the session.
         self.session = self.store.load(&self.session.id)?;

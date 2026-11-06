@@ -208,19 +208,46 @@ impl Provider {
         // Credentials can rotate without invalidating a session. Model and
         // destination changes require a new context; signed continuation data
         // must never be silently sent to another provider or deployment.
-        let mut identity = serde_json::json!({
-            "kind":self.kind,"endpoint":self.endpoint,"model":self.model,"api_version":self.api_version
-        });
-        // Preserve existing key-based fingerprints; account-specific OAuth
-        // continuation belongs to this explicit registration's file.
-        if self.auth == ProviderAuth::Chatgpt {
-            identity["chatgpt_credentials_file"] = serde_json::json!(self.chatgpt_credentials_file);
-        }
+        // serde_json's preserve_order feature is additive across dependencies.
+        // The ACP SDK enables it, so a Value's insertion order is not a stable
+        // storage format. Explicit key ordering preserves pre-SDK identities.
+        let identity = serde_json::to_value(self.identity()).unwrap();
+        let sorted: std::collections::BTreeMap<_, _> =
+            identity.as_object().unwrap().iter().collect();
+        format!("{:x}", Sha256::digest(serde_json::to_vec(&sorted).unwrap()))
+    }
+
+    /// Exact encoding used by 0.12–0.13.1 with preserve_order enabled. Accept
+    /// only this digest of the *current* identity; never rebind another model.
+    pub(crate) fn insertion_order_fingerprint(&self) -> String {
+        use sha2::{Digest, Sha256};
         format!(
             "{:x}",
-            Sha256::digest(serde_json::to_vec(&identity).unwrap())
+            Sha256::digest(serde_json::to_vec(&self.identity()).unwrap())
         )
     }
+
+    fn identity(&self) -> ProviderIdentity<'_> {
+        ProviderIdentity {
+            kind: &self.kind,
+            endpoint: &self.endpoint,
+            model: &self.model,
+            api_version: &self.api_version,
+            chatgpt_credentials_file: (self.auth == ProviderAuth::Chatgpt)
+                .then_some(&self.chatgpt_credentials_file),
+        }
+    }
+}
+
+// Field order deliberately records the historical insertion-order encoding.
+#[derive(Serialize)]
+struct ProviderIdentity<'a> {
+    kind: &'a ProviderKind,
+    endpoint: &'a str,
+    model: &'a str,
+    api_version: &'a Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chatgpt_credentials_file: Option<&'a Option<PathBuf>>,
 }
 #[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]

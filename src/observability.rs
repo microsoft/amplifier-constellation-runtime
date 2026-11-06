@@ -24,6 +24,7 @@ pub fn inspect(store: &Store) -> Result<Value> {
     let mut latency = vec![];
     let mut latest_context = Value::Null;
     let mut latest_stop = Value::Null;
+    let mut latest_rejection = Value::Null;
     let mut input = 0u64;
     let mut output = 0u64;
     let mut cached = 0u64;
@@ -41,11 +42,17 @@ pub fn inspect(store: &Store) -> Result<Value> {
                 | "context.compaction.failed"
                 | "context.compacted"
                 | "turn.finished"
+                | "turn.rejected"
         ) {
             continue;
         }
         *counts.entry(kind.clone()).or_default() += 1;
         let v: Value = serde_json::from_str(raw)?;
+        if kind == "turn.rejected" && latest_rejection.is_null() {
+            let known =
+                v["stage"] == "provider_binding" && v["reason"] == "provider_identity_mismatch";
+            latest_rejection = json!({"at":at,"stage":if known {"provider_binding"} else {"unknown"},"reason":if known {"provider_identity_mismatch"} else {"unknown"},"input_recorded":v["input_recorded"].as_bool(),"model_started":v["model_started"].as_bool()});
+        }
         if kind == "model.started" && latest_context.is_null() {
             latest_context = json!({"at":at});
             for k in [
@@ -107,9 +114,9 @@ pub fn inspect(store: &Store) -> Result<Value> {
             .get(latency.len().saturating_sub(1) * n / 100)
             .copied()
     };
-    Ok(
-        json!({"profile":"agent-runtime.observability/1","coverage":{"events_in_store":total,"sampled_events":rows.len(),"first_seq":rows.last().map(|r|r.0),"last_seq":rows.first().map(|r|r.0),"complete_store_window":total==rows.len() as i64},"counts":counts,"stop_reasons":reasons,"model_step_latency_ms":{"samples":latency.len(),"p50":percentile(50),"p95":percentile(95)},"reported_usage":{"measured_responses":measured,"input_tokens":(measured>0).then_some(input),"output_tokens":(output_samples>0).then_some(output),"cache_read_tokens":(cached_samples>0).then_some(cached),"cache_measured_responses":cached_samples,"cost":null},"latest_context":latest_context,"latest_stop":latest_stop,"notes":["Model steps are engine requests; provider-created responses are counted separately when observed. Usage updates are not request counts.","Usage is provider-reported. Compaction usage is separate in context.compacted events. Cache tokens are not a cost-savings percentage.","No source text, tool arguments, private reasoning or compaction state is included."]}),
-    )
+    let mut report = json!({"profile":"agent-runtime.observability/1","coverage":{"events_in_store":total,"sampled_events":rows.len(),"first_seq":rows.last().map(|r|r.0),"last_seq":rows.first().map(|r|r.0),"complete_store_window":total==rows.len() as i64},"counts":counts,"stop_reasons":reasons,"model_step_latency_ms":{"samples":latency.len(),"p50":percentile(50),"p95":percentile(95)},"reported_usage":{"measured_responses":measured,"input_tokens":(measured>0).then_some(input),"output_tokens":(output_samples>0).then_some(output),"cache_read_tokens":(cached_samples>0).then_some(cached),"cache_measured_responses":cached_samples,"cost":null},"latest_context":latest_context,"latest_stop":latest_stop,"notes":["Model steps are engine requests; provider-created responses are counted separately when observed. Usage updates are not request counts.","Usage is provider-reported. Compaction usage is separate in context.compacted events. Cache tokens are not a cost-savings percentage.","No source text, tool arguments, private reasoning or compaction state is included."]});
+    report["latest_rejection"] = latest_rejection;
+    Ok(report)
 }
 #[cfg(test)]
 mod tests {
@@ -133,6 +140,7 @@ mod tests {
             json!({"reason":"SECRET_ERROR"}),
         )
         .unwrap();
+        s.event("private-session", None, "turn.rejected", json!({"stage":"SECRET_STAGE","reason":"SECRET_REASON","input_recorded":false,"model_started":false})).unwrap();
         let report = inspect(&s).unwrap();
         assert!(!report.to_string().contains("SECRET"));
         assert!(!report.to_string().contains("private-session"));
@@ -140,5 +148,8 @@ mod tests {
         assert_eq!(report["model_step_latency_ms"]["p95"], 800);
         assert!(report["reported_usage"]["cost"].is_null());
         assert_eq!(report["stop_reasons"]["failure_or_unknown"], 1);
+        assert_eq!(report["counts"]["turn.rejected"], 1);
+        assert_eq!(report["latest_rejection"]["reason"], "unknown");
+        assert_eq!(report["latest_rejection"]["model_started"], false);
     }
 }

@@ -27,6 +27,16 @@ pub struct Session {
     pub items: Vec<Value>,
     pub title: String,
 }
+
+#[derive(Debug)]
+pub struct ProviderIdentityMismatch;
+impl std::fmt::Display for ProviderIdentityMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("This session belongs to a different provider, endpoint, or model. Start a new session; saved history is preserved.")
+    }
+}
+impl std::error::Error for ProviderIdentityMismatch {}
+
 impl Store {
     /// Open once per home in a process; clone the Store for concurrent callers.
     pub fn open(home: PathBuf) -> Result<Self> {
@@ -164,6 +174,29 @@ impl Store {
         Ok(())
     }
     pub fn bind_provider(&self, id: &str, key: &str, allow_legacy_openai: bool) -> Result<()> {
+        self.bind_provider_keys(id, key, None, allow_legacy_openai)
+    }
+
+    pub fn bind_configured_provider(
+        &self,
+        id: &str,
+        provider: &crate::config::Provider,
+    ) -> Result<()> {
+        self.bind_provider_keys(
+            id,
+            &provider.fingerprint(),
+            Some(&provider.insertion_order_fingerprint()),
+            provider.kind == crate::config::ProviderKind::Openai,
+        )
+    }
+
+    fn bind_provider_keys(
+        &self,
+        id: &str,
+        key: &str,
+        insertion_order_key: Option<&str>,
+        allow_legacy_openai: bool,
+    ) -> Result<()> {
         let db = self.db()?;
         let (old, items): (Option<String>, String) = db.query_row(
             "SELECT p.provider_key,s.items FROM sessions s LEFT JOIN session_providers p ON p.session=s.id WHERE s.id=?1",
@@ -171,10 +204,11 @@ impl Store {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         if let Some(old) = old {
-            ensure!(
-                old == key,
-                "This session belongs to a different provider, endpoint, or model. Start a new session; saved history is preserved."
-            );
+            if old != key && Some(old.as_str()) != insertion_order_key {
+                return Err(ProviderIdentityMismatch.into());
+            }
+            // Preserve the existing binding and transcript, including the
+            // short-lived SDK-era encoding. This is equivalence, not migration.
         } else {
             ensure!(
                 items == "[]" || allow_legacy_openai,
@@ -191,10 +225,9 @@ impl Store {
                 [id],
                 |r| r.get(0),
             )?;
-            ensure!(
-                actual == key,
-                "Session provider changed; start a new session"
-            );
+            if actual != key && Some(actual.as_str()) != insertion_order_key {
+                return Err(ProviderIdentityMismatch.into());
+            }
         }
         Ok(())
     }
