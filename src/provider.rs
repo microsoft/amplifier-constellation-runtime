@@ -157,9 +157,8 @@ impl Provider {
                     b["include"] = json!(["reasoning.encrypted_content"]);
                     b["parallel_tool_calls"] = json!(false);
                 }
-                if self.native_context() {
-                    b["context_management"] = json!([{"type":"compaction","compact_threshold":self.config.context.compact_threshold_tokens}]);
-                }
+                // Responses currently rejects response.steer when automatic
+                // compaction is enabled. Use /compact at a settled boundary.
                 if let Some(e) = &p.reasoning_effort {
                     b["reasoning"] = json!({"effort":e});
                 }

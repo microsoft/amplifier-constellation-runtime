@@ -8,6 +8,15 @@ from responses_ws import ResponsesWebSocketMixin
 
 class Wire(ResponsesWebSocketMixin,BaseHTTPRequestHandler):
     def log_message(self,*args):pass
+    def do_POST(self):
+        body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        assert self.path=='/responses/compact'
+        self.server.compactions.append(body);self.server.compact_entered.set()
+        self.server.compact_release.wait(10)
+        output=[{'type':'compaction','encrypted_content':'PRIVATE_WINDOW'}]
+        output.extend(v for v in body['input'] if v.get('type') in ['function_call','function_call_output'])
+        self.send_response(200);self.send_header('Content-Type','application/json');self.end_headers()
+        self.wfile.write(json.dumps({'output':output,'usage':{'input_tokens':200,'output_tokens':20}}).encode())
     def do_GET(self):
         self.protocol_version="HTTP/1.1"
         self.send_response(101);self.send_header('Upgrade','websocket');self.send_header('Connection','Upgrade')
@@ -21,15 +30,17 @@ class Tests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.home=Path(self.tmp.name)/'state';self.work=Path(self.tmp.name)/'work'
         self.server=ThreadingHTTPServer(('127.0.0.1',0),Wire);self.server.frames=queue.Queue();self.server.connection=queue.Queue();threading.Thread(target=self.server.serve_forever,daemon=True).start()
+        self.server.compactions=[];self.server.compact_entered=threading.Event();self.server.compact_release=threading.Event()
         subprocess.run([str(protocol.BINARY),'--home',str(self.home),'init','--workspace',str(self.work),'--model','gpt-6.1-sol'],check=True,capture_output=True)
         cfg=json.loads((self.home/'runtime.json').read_text());cfg['provider'].update(endpoint=f'http://127.0.0.1:{self.server.server_port}/responses',api_key_env='RUNTIME_FIXTURE_KEY',reasoning_effort=None);(self.home/'runtime.json').write_text(json.dumps(cfg))
         self.c=protocol.Client(self.home);self.assertTrue(self.c.call('initialize',{'protocolVersion':1,'clientCapabilities':{}})['result']['_meta']['steering']['supported'])
         self.sid=self.c.call('session/new',{'cwd':str(self.work),'mcpServers':[]})['result']['sessionId'];self.wire=None
     def tearDown(self):
+        self.server.compact_release.set()
         self.c.close();self.server.shutdown();self.server.server_close();self.tmp.cleanup()
     def start(self):
         pid=self.c.request('session/prompt',{'sessionId':self.sid,'prompt':[{'type':'text','text':'Do the original work'}]})
-        self.wire=self.server.connection.get(timeout=10);body=self.frame();self.assertEqual(body['type'],'response.create');self.assertNotIn('stream',body)
+        self.wire=self.server.connection.get(timeout=10);body=self.frame();self.assertEqual(body['type'],'response.create');self.assertNotIn('stream',body);self.assertNotIn('context_management',body)
         self.created('r1');return pid
     def frame(self):return self.server.frames.get(timeout=10)
     def event(self,type,**args):self.wire._ws_send({'type':type,**args})
@@ -43,6 +54,53 @@ class Tests(unittest.TestCase):
     def reconfigure(self, **limits):
         self.c.close();p=self.home/'runtime.json';cfg=json.loads(p.read_text());cfg['limits'].update(limits);cfg['context']['auto_compact']=False;p.write_text(json.dumps(cfg))
         self.c=protocol.Client(self.home);self.c.call('initialize',{'protocolVersion':1,'clientCapabilities':{}});self.c.call('session/load',{'sessionId':self.sid,'cwd':str(self.work),'mcpServers':[]})
+    def native_pressure(self):
+        self.c.close();p=self.home/'runtime.json';cfg=json.loads(p.read_text())
+        cfg['limits'].update(max_context_bytes=128000,max_model_calls=2)
+        p.write_text(json.dumps(cfg));self.c=protocol.Client(self.home)
+        self.c.call('initialize',{'protocolVersion':1,'clientCapabilities':{}})
+        self.c.call('session/load',{'sessionId':self.sid,'cwd':str(self.work),'mcpServers':[]})
+    def write_after_large_response(self):
+        call={'type':'function_call','call_id':'write-once','name':'workspace_write','arguments':json.dumps({'path':'proof.txt','content':'one effect'})}
+        self.completed('r1',[{'type':'message','role':'assistant','content':[{'type':'output_text','text':'old observation '*6500}]},call])
+        while True:
+            msg=self.c.q.get(timeout=10)
+            if msg.get('method')=='session/request_permission':return msg
+            self.c.updates.append(msg)
+    def allow(self,msg):
+        self.c.send({'jsonrpc':'2.0','id':msg['id'],'result':{'outcome':{'outcome':'selected','optionId':'allow_once'}}})
+    def test_settled_compaction_holds_new_input_and_preserves_effect_and_call_budget(self):
+        self.native_pressure();pid=self.start();permission=self.write_after_large_response();self.allow(permission)
+        self.assertTrue(self.server.compact_entered.wait(5))
+        self.assertEqual(self.steer('New evidence during compaction','during-maintenance')['result']['outcome'],'injected')
+        self.assertEqual(self.receipts(),[('during-maintenance','received',0)])
+        self.assertTrue(self.server.frames.empty())
+        self.server.compact_release.set();request=self.frame()
+        self.assertNotIn('previous_response_id',request);self.assertNotIn('context_management',request)
+        self.assertEqual(request['input'][0]['encrypted_content'],'PRIVATE_WINDOW')
+        self.assertEqual(sum(v.get('type')=='function_call_output' for v in request['input']),1)
+        self.assertEqual(request['input'][-1]['content'],'New evidence during compaction')
+        self.created('r2')
+        self.steer('Excess third response must not start','at-cap');self.completed('r2')
+        result=self.c.finish(pid)['result'];self.assertEqual(result['stopReason'],'max_turn_requests')
+        self.assertEqual(self.receipts(),[('during-maintenance','incorporated',1),('at-cap','notAccepted',0)])
+        self.assertEqual((self.work/'proof.txt').read_text(),'one effect')
+        self.assertEqual(len(self.server.compactions),1);self.assertTrue(self.server.frames.empty())
+        with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:
+            items=json.loads(db.execute('SELECT items FROM sessions').fetchone()[0])
+        self.assertEqual(sum(v.get('type')=='function_call' for v in items),1)
+        self.assertTrue(any('old observation' in json.dumps(v) for v in items))
+    def test_pending_native_steer_defers_compaction_without_replaying_it(self):
+        self.native_pressure();pid=self.start();permission=self.write_after_large_response()
+        self.steer('New evidence before tool completes','before-result');self.frame();self.accepted('s1','r1')
+        self.event('response.steer.pending',steer={'id':'s1','previous_response_id':'r1'},reason='waiting_for_required_input',required_input=[{'type':'function_call_output','call_id':'write-once'}])
+        self.allow(permission);request=self.frame()
+        self.assertEqual(request['previous_response_id'],'r1')
+        self.assertEqual([v['type'] for v in request['input']],['function_call_output'])
+        self.assertFalse(self.server.compactions)
+        self.created('r2','r1');self.completed('r2');self.assertEqual(self.c.finish(pid)['result']['stopReason'],'end_turn')
+        self.assertEqual(self.receipts(),[('before-result','incorporated',1)])
+        self.assertEqual((self.work/'proof.txt').read_text(),'one effect')
     def test_revised_answers_have_distinct_live_and_replayed_message_ids(self):
         pid=self.start()
         old='{"decision":"speak","text":"Old answer","reason":"before update"}'
@@ -268,6 +326,9 @@ class Tests(unittest.TestCase):
             failures=[json.loads(row[0]) for row in db.execute("SELECT data FROM events WHERE kind='model.failed'")]
         self.assertEqual(len(failures),1);self.assertEqual(failures[0]['stage'],'event');self.assertEqual(failures[0]['category'],'provider')
         self.assertNotIn('PRIVATE-error-body',json.dumps(failures));self.assertNotIn('change',json.dumps(failures))
+        with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:
+            errors=[json.loads(r[0]) for r in db.execute("SELECT data FROM events WHERE kind='provider.error'")]
+        self.assertEqual(errors,[{'event':'response.steer.failed','code':'steering_not_supported','pending_inputs':1,'steering_accepted':True}])
     def test_lost_ack_is_unknown_without_replay(self):
         pid=self.start();self.steer('change','x');self.frame();self.wire.connection.shutdown(socket.SHUT_RDWR);self.wire.connection.close()
         result=self.c.finish(pid);self.assertIn('error',result);self.assertEqual(self.receipts()[0][1],'unknown');self.assertTrue(self.server.frames.empty())
