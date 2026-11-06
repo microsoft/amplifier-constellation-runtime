@@ -214,10 +214,18 @@ pub struct Limits {
     pub max_tool_calls: usize,
     pub max_output_tokens: usize,
     pub max_context_bytes: usize,
+    /// Optional owner-selected whole-turn deadline. Zero permits healthy work
+    /// until completion, cancellation or a request/tool budget.
     pub turn_seconds: u64,
+    /// Transport inactivity, independent of useful work duration.
+    #[serde(default = "provider_idle_default")]
+    pub provider_idle_seconds: u64,
     pub command_seconds: u64,
     pub tool_output_bytes: usize,
     pub max_parallel_turns: usize,
+}
+fn provider_idle_default() -> u64 {
+    300
 }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -255,7 +263,8 @@ impl Config {
                 max_tool_calls: 48,
                 max_output_tokens: 8192,
                 max_context_bytes: 768 * 1024,
-                turn_seconds: 600,
+                turn_seconds: 0,
+                provider_idle_seconds: provider_idle_default(),
                 command_seconds: 60,
                 tool_output_bytes: 64 * 1024,
                 max_parallel_turns: 4,
@@ -492,7 +501,8 @@ impl Config {
             "Invalid context limit"
         );
         ensure!(
-            (1..=3600).contains(&self.limits.turn_seconds)
+            self.limits.turn_seconds <= 7 * 24 * 3600
+                && (1..=3600).contains(&self.limits.provider_idle_seconds)
                 && (1..=300).contains(&self.limits.command_seconds),
             "Invalid time budget"
         );

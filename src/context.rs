@@ -9,6 +9,12 @@ use sha2::{Digest, Sha256};
 #[serde(default, deny_unknown_fields)]
 pub struct Policy {
     pub auto_compact: bool,
+    /// Use native summaries for supported OpenAI/Anthropic routes. Other routes
+    /// keep the explicit extractive fallback. Never reinterpret signed state.
+    pub provider_compaction: bool,
+    pub compact_threshold_tokens: usize,
+    pub max_compactions_per_turn: usize,
+    pub prompt_caching: bool,
     /// Preferred completed turns to keep verbatim, reduced only to fit budget.
     pub retain_recent_turns: usize,
     /// Maximum size of the extractive archive note, not a reasoning summary.
@@ -18,6 +24,10 @@ impl Default for Policy {
     fn default() -> Self {
         Self {
             auto_compact: true,
+            provider_compaction: true,
+            compact_threshold_tokens: 100_000,
+            max_compactions_per_turn: 4,
+            prompt_caching: true,
             retain_recent_turns: 3,
             archive_note_bytes: 8192,
         }
@@ -25,6 +35,14 @@ impl Default for Policy {
 }
 impl Policy {
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            (1024..=1_000_000).contains(&self.compact_threshold_tokens),
+            "Invalid compaction token threshold"
+        );
+        ensure!(
+            (1..=16).contains(&self.max_compactions_per_turn),
+            "Invalid compaction request budget"
+        );
         ensure!(
             (1..=32).contains(&self.retain_recent_turns),
             "Keep between 1 and 32 recent turns"
@@ -56,7 +74,7 @@ fn excerpt(text: &str, max: usize) -> String {
 /// signed reasoning, even through this agent's own archive tools.
 pub fn public_item(index: usize, item: &Value, include_tools: bool) -> Option<Value> {
     let kind = item["type"].as_str().unwrap_or("message");
-    if kind == "provider_state" || kind == "reasoning" {
+    if matches!(kind, "provider_state" | "reasoning" | "compaction") {
         return None;
     }
     let role = item["role"].as_str();

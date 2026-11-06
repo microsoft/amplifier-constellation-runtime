@@ -2,6 +2,7 @@ use crate::config::{Mode, private_dir};
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard},
@@ -380,9 +381,32 @@ impl Store {
         Ok(json!(v))
     }
     pub fn checkpoint(&self, sid: &str, provider: &str, data: &Value) -> Result<bool> {
+        let prefix = data["prefix_sha256"]
+            .as_str()
+            .context("Missing checkpoint provenance")?;
+        // Different settings or providers can compact the same durable prefix.
+        // Keep each canonical result independently; the source digest stays in data.
+        let key = if data["kind"] == "provider_native" {
+            format!(
+                "{:x}",
+                Sha256::digest(json!([provider, prefix, data["settings_sha256"]]).to_string())
+            )
+        } else {
+            prefix.to_owned()
+        };
         Ok(self.db()?.execute(
             "INSERT INTO context_checkpoints VALUES(?1,?2,?3,?4,?5) ON CONFLICT(session,prefix_sha256) DO NOTHING",
-            params![sid, data["prefix_sha256"].as_str().context("Missing checkpoint provenance")?, provider, now(), data.to_string()],
+            params![sid, key, provider, now(), data.to_string()],
         )? == 1)
+    }
+    pub fn provider_checkpoints(&self, sid: &str, provider: &str) -> Result<Vec<Value>> {
+        let db = self.db()?;
+        let mut q=db.prepare("SELECT data FROM context_checkpoints WHERE session=?1 AND provider_key=?2 ORDER BY created DESC LIMIT 32")?;
+        let rows = q
+            .query_map(params![sid, provider], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|s| Ok(serde_json::from_str(&s)?))
+            .collect()
     }
 }

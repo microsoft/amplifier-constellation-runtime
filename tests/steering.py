@@ -1,6 +1,6 @@
 from contextlib import closing
 """Scripted real WebSocket + ACP tests. No model account, no sleeps for ordering."""
-import base64, hashlib, json, os, queue, socket, sqlite3, subprocess, tempfile, threading, unittest
+import base64, hashlib, json, os, queue, socket, sqlite3, subprocess, tempfile, threading, time, unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import protocol
@@ -67,6 +67,26 @@ class Tests(unittest.TestCase):
         self.reconfigure(max_model_calls=1)
         pid=self.start();self.created('r1');self.completed('r1')
         self.assertEqual(self.c.finish(pid)['result']['stopReason'],'end_turn')
+    def test_quiet_healthy_response_survives_transport_idle_with_pongs(self):
+        self.reconfigure(turn_seconds=0,provider_idle_seconds=1)
+        pid=self.start();time.sleep(2.2)
+        self.completed('r1')
+        self.assertEqual(self.c.finish(pid)['result']['stopReason'],'end_turn')
+        self.assertTrue(self.server.frames.empty(),'heartbeats must not issue another model request')
+    def test_dead_websocket_stops_without_replaying_prompt(self):
+        self.server.ignore_pings=True
+        self.reconfigure(turn_seconds=0,provider_idle_seconds=1)
+        pid=self.start();reply=self.c.finish(pid)
+        self.assertIn('stopped answering',reply['error']['message'])
+        self.assertTrue(self.server.frames.empty())
+        with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:
+            events=db.execute("SELECT data FROM events WHERE kind='model.failed'").fetchall()
+        self.assertTrue(any(json.loads(e[0]).get('code')=='transport_idle' for e in events))
+    def test_explicit_whole_turn_deadline_is_distinct_from_request_budget(self):
+        self.reconfigure(turn_seconds=1,provider_idle_seconds=10)
+        pid=self.start();reply=self.c.finish(pid)['result']
+        self.assertEqual(reply['stopReason'],'max_turn_requests')
+        self.assertEqual(reply['_meta']['io.github.bkrabach.agent-runtime']['stopCause'],'turn_deadline')
     def test_input_before_first_create_fits_original_call_budget(self):
         self.reconfigure(max_model_calls=1)
         entered=threading.Event();release=threading.Event();original=Wire.do_GET
@@ -166,9 +186,27 @@ class Tests(unittest.TestCase):
         self.assertEqual(self.c.finish(pid)['result']['stopReason'],'end_turn')
         self.assertEqual((self.work/'proof.txt').read_text(),'one effect')
         self.assertEqual(self.receipts(),[('updated-room','incorporated',1),('reaction','incorporated',1)])
+    def test_server_compaction_and_pending_steering_keep_exactly_one_tool_effect(self):
+        pid=self.start()
+        self.completed('r1',[{'type':'compaction','encrypted_content':'provider-private-window'}, {'type':'function_call','call_id':'write-once','name':'workspace_write','arguments':json.dumps({'path':'native-proof.txt','content':'one effect'})}])
+        while True:
+            msg=self.c.q.get(timeout=10)
+            if msg.get('method')=='session/request_permission':break
+            self.c.updates.append(msg)
+        self.steer('Fresh public evidence','fresh-source');self.frame();self.accepted('s1','r1')
+        self.event('response.steer.pending',steer={'id':'s1','previous_response_id':'r1'},reason='waiting_for_required_input',required_input=[{'type':'function_call_output','call_id':'write-once'}])
+        self.c.send({'jsonrpc':'2.0','id':msg['id'],'result':{'outcome':{'outcome':'selected','optionId':'allow_once'}}})
+        continuation=self.frame();self.assertEqual(continuation['previous_response_id'],'r1')
+        self.assertEqual([v['type'] for v in continuation['input']],['function_call_output'])
+        self.created('r2','r1');self.completed('r2')
+        self.assertEqual(self.c.finish(pid)['result']['stopReason'],'end_turn')
+        self.assertEqual((self.work/'native-proof.txt').read_text(),'one effect')
+        self.assertEqual(self.receipts(),[('fresh-source','incorporated',1)])
+        self.assertNotIn('provider-private-window',json.dumps(self.c.updates))
+
     def test_compaction_during_pending_steering_preserves_the_same_tool_result_chain(self):
         self.c.close()
-        cfg=json.loads((self.home/'runtime.json').read_text());cfg['limits']['max_context_bytes']=32000;cfg['context']['retain_recent_turns']=1
+        cfg=json.loads((self.home/'runtime.json').read_text());cfg['limits']['max_context_bytes']=32000;cfg['context']['retain_recent_turns']=1;cfg['context']['provider_compaction']=False
         (self.home/'runtime.json').write_text(json.dumps(cfg))
         items=[]
         for i in range(20):

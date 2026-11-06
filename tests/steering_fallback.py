@@ -43,8 +43,8 @@ class Tests(providers.Tests):
             self.assertEqual(self.prompt(c,sid,'Unrelated new question')['result']['stopReason'],'end_turn')
             self.assertEqual(len(self.server.case['requests']),3)
             self.assertNotIn(marker,json.dumps(self.server.case['requests'][2][1]))
-            self.assertIn('quarantined',self.server.case['requests'][2][1]['system'])
-            self.assertIn('uncertain',self.server.case['requests'][2][1]['system'])
+            self.assertIn('quarantined',json.dumps(self.server.case['requests'][2][1]['system']))
+            self.assertIn('uncertain',json.dumps(self.server.case['requests'][2][1]['system']))
             ack=c.call('_session/acknowledge_inputs',{'sessionId':sid,'inputIds':['uncertain'],'disposition':'proceed_without_replay'})
             receipt=ack['result']['inputReceipts'][0]
             self.assertTrue(receipt['reconciled']);self.assertEqual(receipt['state'],'unknown')

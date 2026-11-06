@@ -15,6 +15,7 @@ pub mod mcp;
 pub mod media;
 pub mod migrate;
 pub mod model_policy;
+pub mod observability;
 pub mod provider;
 pub mod rpc;
 pub mod server;

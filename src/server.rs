@@ -209,6 +209,10 @@ async fn handle(state: Arc<State>, msg: &Value) -> Result<Value> {
             !state.initialized.swap(true, Ordering::SeqCst),
             "Connection already initialized"
         );
+        state.peer.compaction_supported.store(
+            p["clientCapabilities"]["session"]["compaction"].is_object(),
+            Ordering::SeqCst,
+        );
         state.client_form_elicitation.store(
             p["clientCapabilities"]["elicitation"]["form"].is_object(),
             Ordering::SeqCst,

@@ -66,7 +66,21 @@ impl Turn<'_> {
         )?;
         self.peer.update(&self.session.id,json!({"sessionUpdate":"session_info_update","title":self.session.title,"updatedAt":crate::store::now()})).await?;
         let token = self.cancel.clone();
-        let result = tokio::select! { biased; _=token.cancelled()=>Ok("cancelled"), r=tokio::time::timeout(std::time::Duration::from_secs(self.config.limits.turn_seconds),self.execute(&turn))=>match r {Ok(r)=>r,Err(_)=>{token.cancel();Ok("max_turn_requests")}} };
+        let started = std::time::Instant::now();
+        let seconds = self.config.limits.turn_seconds;
+        let deadline = async move {
+            if seconds == 0 {
+                std::future::pending::<()>().await;
+            } else {
+                tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
+            }
+        };
+        let result = tokio::select! {
+            biased;
+            _=token.cancelled()=>Ok("cancelled"),
+            _=deadline=>{token.cancel();Ok("turn_deadline")},
+            r=self.execute(&turn)=>r,
+        };
         for report in self.mcp.cancel_pending().await {
             self.store.event(
                 &self.session.id,
@@ -86,14 +100,20 @@ impl Turn<'_> {
         self.inbox.close(state)?;
         self.inbox.publish_summary(self.peer).await?;
         self.store.finish(&turn, state)?;
+        let reason = result
+            .as_ref()
+            .copied()
+            .unwrap_or("provider_or_execution_failure");
         self.store.event(
             &self.session.id,
             Some(&turn),
             "turn.finished",
-            json!({"state":state}),
+            json!({"state":state,"reason":reason,"elapsed_ms":started.elapsed().as_millis(),"turn_seconds":seconds}),
         )?;
         Ok(
-            json!({"stopReason":result?,"_meta":{"io.github.bkrabach.agent-runtime":{"turnId":turn,"state":state,"inputReceipts":self.inbox.summary()?}}}),
+            // ACP has a shared request-limit stop reason; the exact cause is
+            // carried separately rather than introducing an invalid ACP enum.
+            json!({"stopReason":match result? {"turn_deadline"|"tool_call_budget"=>"max_turn_requests",other=>other},"_meta":{"io.github.bkrabach.agent-runtime":{"turnId":turn,"state":state,"stopCause":reason,"elapsedMs":started.elapsed().as_millis(),"inputReceipts":self.inbox.summary()?}}}),
         )
     }
     async fn execute(&mut self, turn: &str) -> Result<&'static str> {
@@ -152,6 +172,9 @@ impl Turn<'_> {
         if self.config.provider.native.disable_function_tools {
             definitions.clear();
         }
+        // MCP tools come from a map. Stable ordering keeps an unchanged tool
+        // prefix cacheable across connections and process restarts.
+        definitions.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
         let session_instructions = format!(
             "{}\nCurrent session filesystem roots: {}\nUnavailable optional integrations (do not invent access; continue unrelated work with available tools): {}",
             self.config.instructions,
@@ -186,18 +209,29 @@ impl Turn<'_> {
             // Candidates live in the durable inbox until the provider completes.
             // Rejected or ambiguous input must not become authoritative history
             // and silently reappear in a later request after reconciliation.
-            let mut request_items = self.session.items.clone();
-            request_items.extend(provider.boundary_inputs.iter().map(|p| p.item.clone()));
             let fixed_bytes = instructions.len() + serde_json::to_vec(&definitions)?.len();
             ensure!(
                 fixed_bytes < self.config.limits.max_context_bytes,
                 "Instructions and tool definitions exceed the context budget"
             );
-            let view = crate::context::prepare(
-                &request_items,
-                &self.config.context,
-                self.config.limits.max_context_bytes - fixed_bytes,
-            )?;
+            let mut view = provider
+                .prepare_context(
+                    &self.session.items,
+                    &instructions,
+                    &definitions,
+                    (self.store, &self.session.id, turn),
+                    self.peer,
+                    &self.cancel,
+                )
+                .await?;
+            view.items
+                .extend(provider.boundary_inputs.iter().map(|p| p.item.clone()));
+            ensure!(
+                crate::media::context_bytes(&view.items)? + fixed_bytes
+                    <= self.config.limits.max_context_bytes
+                    && crate::media::request_fits(&view.items)?,
+                "Pending input exceeds model context capacity; no incorporation claimed"
+            );
             if let Some(checkpoint) = &view.checkpoint
                 && self.store.checkpoint(
                     &self.session.id,
@@ -216,8 +250,9 @@ impl Turn<'_> {
                 &self.session.id,
                 Some(turn),
                 "model.started",
-                json!({"index":call_index+1}),
+                json!({"index":call_index+1,"history_items":self.session.items.len(),"history_bytes":serde_json::to_vec(&self.session.items)?.len(),"model_items":view.items.len(),"model_context_bytes":serde_json::to_vec(&view.items)?.len(),"instructions_bytes":instructions.len(),"tool_definitions_bytes":serde_json::to_vec(&definitions)?.len(),"tool_definitions":definitions.len(),"context_limit_bytes":self.config.limits.max_context_bytes}),
             )?;
+            let model_started = std::time::Instant::now();
             provider.continuation_items = self.session.items[continuation_start..].to_vec();
             let response = provider
                 .complete(
@@ -233,7 +268,7 @@ impl Turn<'_> {
                 &self.session.id,
                 Some(turn),
                 "model.finished",
-                json!({"index":call_index+1,"usage":response["usage"],"status":response["status"]}),
+                json!({"index":call_index+1,"usage":response["usage"],"status":response["status"],"elapsed_ms":model_started.elapsed().as_millis()}),
             )?;
             let inputs: Vec<crate::steering::Input> = response
                 .get("_steering_inputs")
@@ -251,6 +286,19 @@ impl Turn<'_> {
             continuation_start = self.session.items.len();
             self.inbox.save_inputs(&self.session, &inputs)?;
             for item in output {
+                if item["type"] == "compaction" {
+                    let id = format!(
+                        "server-{}",
+                        item["id"]
+                            .as_str()
+                            .map(str::to_owned)
+                            .unwrap_or_else(crate::store::id)
+                    );
+                    self.peer
+                        .compaction(&self.session.id, &id, "completed")
+                        .await?;
+                    self.store.event(&self.session.id,Some(turn),"context.compacted",json!({"kind":"provider_server","full_history_preserved":true,"usage_in_model_response":true}))?;
+                }
                 for update in crate::media::updates(item, false)? {
                     self.peer.update(&self.session.id, update).await?;
                 }
@@ -335,7 +383,7 @@ impl Turn<'_> {
             }
             for call in calls {
                 if tool_count >= self.config.limits.max_tool_calls {
-                    return Ok("max_turn_requests");
+                    return Ok("tool_call_budget");
                 }
                 tool_count += 1;
                 let call_id = call["call_id"].as_str().context("Tool call has no ID")?;
