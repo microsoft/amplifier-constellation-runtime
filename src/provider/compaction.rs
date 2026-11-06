@@ -13,6 +13,36 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
+#[derive(Debug)]
+struct ContextRejection {
+    status: u16,
+    reason: &'static str,
+}
+impl std::fmt::Display for ContextRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Context service rejected request (HTTP {}, {}); history unchanged",
+            self.status, self.reason
+        )
+    }
+}
+impl std::error::Error for ContextRejection {}
+
+fn rejection_reason(body: &Value) -> &'static str {
+    // Never copy arbitrary provider messages, parameters or codes into logs.
+    match body["error"]["code"]
+        .as_str()
+        .or(body["error"]["type"].as_str())
+    {
+        Some("context_length_exceeded") => "context_length_exceeded",
+        Some("rate_limit_exceeded" | "rate_limit_error") => "rate_limited",
+        Some("invalid_api_key" | "authentication_error") => "authentication_failed",
+        Some("invalid_request_error") => "invalid_request",
+        _ => "provider_rejected",
+    }
+}
+
 fn digest(value: &(impl serde::Serialize + ?Sized)) -> Result<String> {
     Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(value)?)))
 }
@@ -33,7 +63,7 @@ fn restored(
     original: &[Value],
     checkpoints: Vec<Value>,
     settings: &str,
-) -> Result<(Vec<Value>, Option<usize>)> {
+) -> Result<(Vec<Value>, Option<usize>, bool)> {
     for c in checkpoints {
         if c["kind"] != "provider_native" || c["settings_sha256"] != settings {
             continue;
@@ -50,10 +80,15 @@ fn restored(
             return Ok((
                 server_window(&original[n..], result),
                 (!newer_server_window).then_some(baseline),
+                true,
             ));
         }
     }
-    Ok((server_window(original, original.to_vec()), None))
+    Ok((
+        server_window(original, original.to_vec()),
+        None,
+        original.iter().any(|v| v["type"] == "compaction"),
+    ))
 }
 
 /// Only server compaction items in the durable transcript can prune a prefix.
@@ -98,11 +133,22 @@ impl Provider {
         }
         let settings = digest(&json!({"instructions":instructions,"tools":tools}))?;
         let provider = self.config.provider.fingerprint();
-        let (mut items, compacted_bytes) = restored(
+        let (mut items, compacted_bytes, native_window) = restored(
             original,
             store.provider_checkpoints(sid, &provider)?,
             &settings,
         )?;
+        // An existing transcript may be much larger than a provider's input
+        // window. Native compaction cannot ingest an unlimited archive. Keep
+        // the established bounded projection until a native checkpoint exists,
+        // including producer-declared refreshed snapshots. Never reinterpret
+        // or prune a canonical native window through the extractive fallback.
+        let mut checkpoint = None;
+        if !native_window {
+            let view = crate::context::prepare(original, &self.config.context, budget)?;
+            items = view.items;
+            checkpoint = view.checkpoint;
+        }
         let bytes = crate::media::context_bytes(&items)?;
         // A canonical window can retain large user messages. Recompacting the
         // same window on every new prompt adds latency without reclaiming it.
@@ -150,12 +196,14 @@ impl Provider {
             let (window, usage) = match result {
                 Ok(v) => v,
                 Err(e) => {
-                    store.event(sid,Some(turn),"context.compaction.failed",json!({"provider":self.config.provider.kind,"elapsed_ms":started.elapsed().as_millis(),"full_history_preserved":true}))?;
+                    let rejection = e.downcast_ref::<ContextRejection>();
+                    store.event(sid,Some(turn),"context.compaction.failed",json!({"provider":self.config.provider.kind,"elapsed_ms":started.elapsed().as_millis(),"full_history_preserved":true,"http_status":rejection.map(|v|v.status),"reason":rejection.map(|v|v.reason).unwrap_or("context_maintenance_failed")}))?;
                     return Err(e);
                 }
             };
-            let checkpoint = json!({"kind":"provider_native","prefix_items":original.len(),"prefix_sha256":digest(&original)?,"settings_sha256":settings,"model_items":window});
-            store.checkpoint(sid, &provider, &checkpoint)?;
+            let native_checkpoint = json!({"kind":"provider_native","prefix_items":original.len(),"prefix_sha256":digest(&original)?,"settings_sha256":settings,"model_items":window});
+            store.checkpoint(sid, &provider, &native_checkpoint)?;
+            checkpoint = None;
             items = window;
             self.context_tokens = 0;
             store.event(sid,Some(turn),"context.compacted",json!({"kind":"provider_native","input_bytes":bytes,"model_context_bytes":serde_json::to_vec(&items)?.len(),"elapsed_ms":started.elapsed().as_millis(),"usage":usage,"full_history_preserved":true}))?;
@@ -164,10 +212,7 @@ impl Provider {
             crate::media::context_bytes(&items)? <= budget && crate::media::request_fits(&items)?,
             "Provider model window exceeds byte limit; full history retained"
         );
-        Ok(View {
-            items,
-            checkpoint: None,
-        })
+        Ok(View { items, checkpoint })
     }
 
     async fn bounded_json(
@@ -180,11 +225,23 @@ impl Provider {
                 .send()
                 .await
                 .context("Context service unavailable")?;
-            ensure!(
-                response.status().is_success(),
-                "Context service rejected request (HTTP {}); history unchanged",
-                response.status().as_u16()
-            );
+            if !response.status().is_success() {
+                let status = response.status().as_u16();
+                let mut stream = response.bytes_stream();
+                let mut bytes = Vec::new();
+                while let Some(Ok(part)) = stream.next().await {
+                    if bytes.len() + part.len() > 8192 {
+                        break;
+                    }
+                    bytes.extend_from_slice(&part);
+                }
+                let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+                return Err(ContextRejection {
+                    status,
+                    reason: rejection_reason(&body),
+                }
+                .into());
+            }
             let streaming = response
                 .headers()
                 .get("content-type")

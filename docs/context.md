@@ -11,6 +11,14 @@ No transcript is copied into the instance database. Replacing the native store c
 ## Working context and compaction
 
 The saved transcript stays intact. Model requests use a separate working window.
+When an older session has no valid native checkpoint, the runtime first applies
+the existing bounded archive projection and producer-declared snapshot refreshes.
+This prevents a switch to native compaction from submitting an oversized full
+transcript: the compact endpoint itself still has an input context limit. The
+archive note identifies omitted history and `session_history` retrieves it.
+Once a native checkpoint exists, its canonical window is retained intact.
+Compaction rejection events include the HTTP status and an allowlisted reason
+(for example `context_length_exceeded`), never the provider's raw error text.
 OpenAI Responses uses the standalone compact endpoint at a settled boundary,
 including between tool steps of a long turn. Automatic `context_management`
 compaction is disabled because the live API rejects `response.steer` with that
