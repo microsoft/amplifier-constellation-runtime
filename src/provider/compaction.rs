@@ -29,7 +29,11 @@ pub(super) fn context_tokens(usage: &Value) -> u64 {
             .unwrap_or(0)
 }
 
-fn restored(original: &[Value], checkpoints: Vec<Value>, settings: &str) -> Result<Vec<Value>> {
+fn restored(
+    original: &[Value],
+    checkpoints: Vec<Value>,
+    settings: &str,
+) -> Result<(Vec<Value>, Option<usize>)> {
     for c in checkpoints {
         if c["kind"] != "provider_native" || c["settings_sha256"] != settings {
             continue;
@@ -41,10 +45,15 @@ fn restored(original: &[Value], checkpoints: Vec<Value>, settings: &str) -> Resu
         if let Some(base) = c["model_items"].as_array() {
             let mut result = base.clone();
             result.extend_from_slice(&original[n..]);
-            return Ok(server_window(&original[n..], result));
+            let baseline = crate::media::context_bytes(base)?;
+            let newer_server_window = original[n..].iter().any(|v| v["type"] == "compaction");
+            return Ok((
+                server_window(&original[n..], result),
+                (!newer_server_window).then_some(baseline),
+            ));
         }
     }
-    Ok(server_window(original, original.to_vec()))
+    Ok((server_window(original, original.to_vec()), None))
 }
 
 /// Only server compaction items in the durable transcript can prune a prefix.
@@ -89,14 +98,22 @@ impl Provider {
         }
         let settings = digest(&json!({"instructions":instructions,"tools":tools}))?;
         let provider = self.config.provider.fingerprint();
-        let mut items = restored(
+        let (mut items, compacted_bytes) = restored(
             original,
             store.provider_checkpoints(sid, &provider)?,
             &settings,
         )?;
         let bytes = crate::media::context_bytes(&items)?;
-        let due = bytes > budget * 3 / 4
-            || self.context_tokens >= self.config.context.compact_threshold_tokens as u64;
+        // A canonical window can retain large user messages. Recompacting the
+        // same window on every new prompt adds latency without reclaiming it.
+        // Wait for bounded material growth, unless the hard byte limit requires
+        // another attempt. This is byte-pressure hysteresis, not token estimation.
+        let grew =
+            compacted_bytes.is_none_or(|baseline| bytes > baseline.saturating_add(budget / 8));
+        let due = bytes > budget
+            || (grew
+                && (bytes > budget * 3 / 4
+                    || self.context_tokens >= self.config.context.compact_threshold_tokens as u64));
         // OpenAI compacts active chains on the server. Never replace an active
         // chain while a steering successor might already be executing.
         let can_compact =
@@ -278,7 +295,7 @@ impl Provider {
         body["stream"] = json!(true);
         body["compaction"] = json!({"type":"summarize"});
         body.as_object_mut().unwrap().remove("tool_choice");
-        if let Some(o) = body["output_config"].as_object_mut() {
+        if let Some(o) = body.get_mut("output_config").and_then(Value::as_object_mut) {
             o.remove("format");
         }
         let response = self
@@ -324,7 +341,7 @@ mod tests {
         let cp = json!({"kind":"provider_native","prefix_items":1,"prefix_sha256":digest(&original[..1]).unwrap(),"settings_sha256":"settings","model_items":canonical});
         let view = restored(&original, vec![cp.clone()], "settings").unwrap();
         assert_eq!(
-            view,
+            view.0,
             vec![
                 canonical[0].clone(),
                 canonical[1].clone(),
@@ -332,10 +349,12 @@ mod tests {
             ]
         );
         assert_eq!(
-            restored(&original, vec![cp.clone()], "changed-tools").unwrap(),
+            restored(&original, vec![cp.clone()], "changed-tools")
+                .unwrap()
+                .0,
             original
         );
         let changed = vec![json!({"role":"user","content":"different"})];
-        assert_eq!(restored(&changed, vec![cp], "settings").unwrap(), changed);
+        assert_eq!(restored(&changed, vec![cp], "settings").unwrap().0, changed);
     }
 }

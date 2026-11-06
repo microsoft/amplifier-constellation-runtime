@@ -27,7 +27,10 @@ fallback. This release uses foreground compaction; it does not race background
 summaries against an evolving transcript.
 
 Checkpoints are bound to the original prefix, provider and settings hashes.
-They survive restart but cannot be applied to a changed prefix. Other providers
+They survive restart but cannot be applied to a changed prefix. A restored native
+window is compacted again after material growth (one eighth of the byte budget),
+or when the hard byte limit is exceeded; retained user messages alone do not
+trigger repeated compaction on every small continuation. Other providers
 use a bounded extractive archive note with item ranges and a digest, retaining
 the current tool continuation. The `session_history` tool retrieves original
 public messages when more detail is needed. No compaction grants authority or
