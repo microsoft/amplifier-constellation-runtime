@@ -21,8 +21,18 @@ pub struct Turn<'a> {
     pub inbox: Arc<crate::steering::Inbox>,
 }
 impl Turn<'_> {
-    pub async fn run(mut self, prompt: Vec<Value>) -> Result<Value> {
+    pub async fn run(self, prompt: Vec<Value>) -> Result<Value> {
         let _lock = self.store.lock(&self.session.id)?;
+        let config = self.store.session_config(&self.session.id, self.config)?;
+        Turn {
+            config: &config,
+            ..self
+        }
+        .run_locked(prompt)
+        .await
+    }
+
+    async fn run_locked(mut self, prompt: Vec<Value>) -> Result<Value> {
         self.store
             .recover_inputs(&self.session.id, Some(&self.inbox.turn))?;
         // Earlier uncertain submissions remain quarantined in the inbox. A new

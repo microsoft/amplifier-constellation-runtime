@@ -1,6 +1,6 @@
 use crate::config::{Mode, private_dir};
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -54,6 +54,7 @@ impl Store {
         db.execute_batch("CREATE TABLE IF NOT EXISTS turn_inputs(sequence INTEGER PRIMARY KEY AUTOINCREMENT,session TEXT NOT NULL,turn TEXT NOT NULL,input_id TEXT NOT NULL,item TEXT NOT NULL,state TEXT NOT NULL,recorded INTEGER NOT NULL DEFAULT 0,reason TEXT,remote_parent TEXT,remote_id TEXT,successor TEXT,reconciled INTEGER NOT NULL DEFAULT 0,UNIQUE(session,input_id))")?;
         // Keep the original sessions table compatible with 0.1 for rollback.
         db.execute_batch("CREATE TABLE IF NOT EXISTS session_providers(session TEXT PRIMARY KEY,provider_key TEXT NOT NULL)")?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS session_model_choices(session TEXT PRIMARY KEY,data TEXT NOT NULL)")?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS context_checkpoints(session TEXT NOT NULL,prefix_sha256 TEXT NOT NULL,provider_key TEXT NOT NULL,created TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(session,prefix_sha256))")?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS history_identity(id INTEGER PRIMARY KEY CHECK(id=1),value TEXT NOT NULL)")?;
         db.execute(
@@ -87,6 +88,7 @@ impl Store {
             "events",
             "turns",
             "session_providers",
+            "session_model_choices",
             "context_checkpoints",
             "history_imports",
             "turn_inputs",
@@ -175,6 +177,94 @@ impl Store {
     }
     pub fn bind_provider(&self, id: &str, key: &str, allow_legacy_openai: bool) -> Result<()> {
         self.bind_provider_keys(id, key, None, allow_legacy_openai)
+    }
+
+    /// Resolve under the session lock before each turn, including when another
+    /// connection changed the choice after this connection loaded the session.
+    pub fn session_config(
+        &self,
+        id: &str,
+        config: &crate::config::Config,
+    ) -> Result<crate::config::Config> {
+        let data: Option<String> = self
+            .db()?
+            .query_row(
+                "SELECT data FROM session_model_choices WHERE session=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match data {
+            Some(data) => crate::model_selection::apply(config, &serde_json::from_str(&data)?),
+            None => Ok(config.clone()),
+        }
+    }
+
+    /// Caller holds the session file lock and excludes active turn admission.
+    /// Choice and provider binding commit together; saved history is never edited.
+    pub fn select_model_config(
+        &self,
+        id: &str,
+        config: &crate::config::Config,
+        key: &str,
+        value: &str,
+    ) -> Result<crate::config::Config> {
+        let current = self.session_config(id, config)?;
+        let choices = crate::model_selection::options(config);
+        let mut selection = crate::model_selection::Selection {
+            route: crate::model_selection::route(config),
+            model: current.provider.model.clone(),
+            reasoning_effort: current.provider.reasoning_effort.clone(),
+        };
+        match key {
+            "model" => {
+                let choice = choices
+                    .iter()
+                    .find(|c| c.model == value)
+                    .context("Model is not in the installation's configured choices")?;
+                if value != selection.model {
+                    selection.model = value.into();
+                    selection.reasoning_effort = choice.reasoning_effort.clone();
+                }
+            }
+            "reasoning_effort" => {
+                let choice = choices
+                    .iter()
+                    .find(|c| c.model == selection.model)
+                    .context("Model choice unavailable")?;
+                ensure!(
+                    !choice.reasoning_efforts.is_empty(),
+                    "This model offers no reasoning control"
+                );
+                selection.reasoning_effort = (value != "default").then(|| value.to_owned());
+            }
+            _ => anyhow::bail!("Unknown model configuration option"),
+        }
+        let selected = crate::model_selection::apply(config, &selection)?;
+        let session = self.load(id)?;
+        let model_changed = current.provider.model != selected.provider.model;
+        ensure!(
+            !model_changed || crate::model_selection::portable_history(&session.items),
+            "This session contains private provider continuation, media or tool history. Keep its model or choose the new model in a new session; saved history is preserved"
+        );
+        // Validate the existing identity before allowing an explicit same-route
+        // transition. A configuration edit cannot use selection to adopt history
+        // that already belongs to a different endpoint, provider or model.
+        self.bind_configured_provider(id, &current.provider)?;
+        let mut db = self.db()?;
+        let tx = db.transaction()?;
+        tx.execute("INSERT INTO session_model_choices(session,data) VALUES(?1,?2) ON CONFLICT(session) DO UPDATE SET data=excluded.data",
+            params![id, serde_json::to_string(&selection)?])?;
+        if model_changed {
+            tx.execute(
+                "UPDATE session_providers SET provider_key=?1 WHERE session=?2",
+                params![selected.provider.fingerprint(), id],
+            )?;
+        }
+        tx.execute("INSERT INTO events(session,kind,at,data) VALUES(?1,'session.model_selected',?2,?3)",
+            params![id,now(),json!({"model":selection.model,"reasoning_effort":selection.reasoning_effort,"provider_route_changed":false}).to_string()])?;
+        tx.commit()?;
+        Ok(selected)
     }
 
     pub fn bind_configured_provider(

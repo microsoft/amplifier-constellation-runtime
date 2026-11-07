@@ -163,8 +163,12 @@ fn known(method: &str) -> bool {
 fn modes(mode: Mode) -> Value {
     json!({"currentModeId":mode.id(),"availableModes":[{"id":"read_only","name":"Read only","description":"Inspect without changing files or calling mutating tools"},{"id":"ask","name":"Ask before changes","description":"Ask this client before each write, command, or mutating MCP call"},{"id":"workspace","name":"Workspace access","description":"Allow local workspace writes and isolated Linux commands; other mutations still require permission"}]})
 }
-fn config_options(mode: Mode) -> Value {
-    json!([{"id":"mode","name":"Permissions","description":"Controls changes and tool approvals for this session","category":"mode","type":"select","currentValue":mode.id(),"options":modes(mode)["availableModes"].as_array().unwrap().iter().map(|m| json!({"value":m["id"],"name":m["name"],"description":m["description"]})).collect::<Vec<_>>()}])
+fn config_options(mode: Mode, config: &Config) -> Value {
+    let mut options = vec![
+        json!({"id":"mode","name":"Permissions","description":"Controls changes and tool approvals for this session","category":"mode","type":"select","currentValue":mode.id(),"options":modes(mode)["availableModes"].as_array().unwrap().iter().map(|m| json!({"value":m["id"],"name":m["name"],"description":m["description"]})).collect::<Vec<_>>()}),
+    ];
+    options.extend(crate::model_selection::config_options(config));
+    json!(options)
 }
 async fn handle(state: Arc<State>, msg: &Value) -> Result<Value> {
     let method = msg["method"].as_str().unwrap_or("");
@@ -280,11 +284,13 @@ async fn handle(state: Arc<State>, msg: &Value) -> Result<Value> {
                 "Client-supplied local MCP programs are disabled. Use HTTP MCP, or explicitly trust this ACP client with host command authority in runtime configuration."
             );
             let mcp = Arc::new(mcp::Tools::connect(&specs).await?);
-            let session = if method == "session/new" {
-                state.store.create(cwd, state.config.mode)?
+            let (session, selected) = if method == "session/new" {
+                (state.store.create(cwd, state.config.mode)?, config.clone())
             } else {
                 let sid = p["sessionId"].as_str().context("Session ID required")?;
                 let _lock = state.store.lock(sid)?;
+                // Reject an unavailable saved choice before replay or input recovery.
+                let selected = state.store.session_config(sid, &config)?;
                 state.store.recover_inputs(sid, None)?;
                 let session = state
                     .store
@@ -333,7 +339,7 @@ async fn handle(state: Arc<State>, msg: &Value) -> Result<Value> {
                         state.peer.update(sid, update).await?;
                     }
                 }
-                session
+                (session, selected)
             };
             {
                 let mut loaded = state.loaded.lock().unwrap();
@@ -349,8 +355,7 @@ async fn handle(state: Arc<State>, msg: &Value) -> Result<Value> {
                     },
                 );
             }
-            let mut result =
-                json!({"modes":modes(session.mode),"configOptions":config_options(session.mode)});
+            let mut result = json!({"modes":modes(session.mode),"configOptions":config_options(session.mode, &selected)});
             if method == "session/new" {
                 result["sessionId"] = json!(session.id);
             }
@@ -422,27 +427,70 @@ async fn handle(state: Arc<State>, msg: &Value) -> Result<Value> {
         }
         "session/set_mode" | "session/set_config_option" => {
             let sid = p["sessionId"].as_str().context("Session ID required")?;
-            ensure!(
-                state.loaded.lock().unwrap().contains_key(sid),
-                "Load this session first"
-            );
-            let _lock = state.store.lock(sid)?;
-            let mut session = state.store.load(sid)?;
-            let value = if method == "session/set_config_option" {
-                ensure!(
-                    p["configId"] == "mode",
-                    "Unknown session configuration option"
-                );
-                &p["value"]
+            let key = if method == "session/set_mode" {
+                "mode"
             } else {
-                &p["modeId"]
+                p["configId"]
+                    .as_str()
+                    .ok_or_else(|| protocol_error(-32602, "Configuration ID required"))?
             };
-            session.mode = Mode::parse(value.as_str().context("Mode required")?)?;
-            state.store.save(&session)?;
-            state.peer.update(sid, json!({"sessionUpdate":"config_option_update","configOptions":config_options(session.mode)})).await?;
-            state.peer.update(sid, json!({"sessionUpdate":"current_mode_update","currentModeId":session.mode.id()})).await?;
+            let value = if method == "session/set_mode" {
+                &p["modeId"]
+            } else {
+                &p["value"]
+            };
+            let value = value
+                .as_str()
+                .ok_or_else(|| protocol_error(-32602, "Configuration value must be a string"))?;
+            let (session, options) = {
+                let loaded = state.loaded.lock().unwrap();
+                let current = loaded
+                    .get(sid)
+                    .ok_or_else(|| protocol_error(-32002, "Load this session first"))?;
+                ensure!(
+                    !state.active.lock().unwrap().contains_key(sid),
+                    "Cannot change configuration during a running turn"
+                );
+                let _lock = state.store.lock(sid)?;
+                let mut session = state.store.load(sid)?;
+                let selected = if matches!(key, "model" | "reasoning_effort") {
+                    let selected = state.store.session_config(sid, &current.config)?;
+                    if !crate::model_selection::allows(&selected, key, value) {
+                        return Err(protocol_error(
+                            -32602,
+                            "Value is not an offered session configuration choice",
+                        ));
+                    }
+                    state
+                        .store
+                        .select_model_config(sid, &current.config, key, value)?
+                } else if key == "mode" {
+                    let selected = state.store.session_config(sid, &current.config)?;
+                    session.mode =
+                        Mode::parse(value).map_err(|e| protocol_error(-32602, e.to_string()))?;
+                    state.store.save(&session)?;
+                    selected
+                } else {
+                    return Err(protocol_error(
+                        -32602,
+                        "Unknown session configuration option",
+                    ));
+                };
+                let options = config_options(session.mode, &selected);
+                (session, options)
+            };
+            state
+                .peer
+                .update(
+                    sid,
+                    json!({"sessionUpdate":"config_option_update","configOptions":options}),
+                )
+                .await?;
+            if key == "mode" {
+                state.peer.update(sid, json!({"sessionUpdate":"current_mode_update","currentModeId":session.mode.id()})).await?;
+            }
             Ok(if method == "session/set_config_option" {
-                json!({"configOptions":config_options(session.mode)})
+                json!({"configOptions":options})
             } else {
                 json!({})
             })

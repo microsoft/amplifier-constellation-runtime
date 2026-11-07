@@ -2,6 +2,69 @@
 
 The production wire profile remains ACP v1. It supports load with replay, resume without replay, close, delete, list, permission modes/config options, embedded resource context and resource links. Prompt images/audio depend on the configured provider. Local stdio MCP requires explicit host-command trust; HTTP MCP is supported in the default restricted profile.
 
+## Session model and reasoning choices
+
+The standard `session/set_config_option` method accepts `model` (category
+`model`) and, when configured, `reasoning_effort` (category `thought_level`).
+New, load and resume return the current values in `configOptions`. A successful
+change returns the full option list and emits `config_option_update`.
+The existing `mode` option continues to govern tool permissions independently.
+
+By default the only model choice is the installation's configured model. An
+owner can add `model_options` to `runtime.json`, alongside `provider`:
+
+```json
+{
+  "model_options": [
+    {
+      "model": "gpt-6.1-sol",
+      "name": "Sol",
+      "reasoning_effort": "medium",
+      "reasoning_efforts": ["low", "medium", "high"]
+    },
+    {
+      "model": "gpt-6-luna",
+      "name": "Luna",
+      "reasoning_effort": "low",
+      "reasoning_efforts": ["low", "medium"]
+    }
+  ]
+}
+```
+
+The default model entry and effort must match `provider.model` and
+`provider.reasoning_effort`. These are explicitly configured choices, not model
+discovery or a claim of account entitlement. All choices use the same configured
+endpoint, account selector, provider capabilities and permission policy. No
+client can provide a new endpoint or credential. Include `default` in a model's
+`reasoning_efforts` only to allow omitting the provider reasoning parameter; this
+differs from the explicit effort `none`. An empty list exposes no reasoning
+control. Invalid, duplicate or unsupported configuration is rejected at startup.
+
+An explicit choice is saved per session and survives close, process restart and
+load/resume. A new session still uses installation defaults. Other connections
+resolve the latest durable choice when admitting their next turn. Changes during
+an active turn are rejected, including across processes. Unknown values leave
+the choice and permissions unchanged. Model changes select the new model's
+configured default effort; reasoning changes affect only the current model.
+
+Model changes accept empty or ordinary text-only histories. Private reasoning,
+provider continuation, media, tool/effect history or unknown item shapes refuse
+a model change with a remedy to keep the model or explicitly start a new session.
+The runtime does not strip private state, rewrite old history, retry tools, or
+create a replacement session to make a switch work. Saved input uncertainty and
+original observations are retained. Reasoning changes keep the same model binding.
+If an owner removes a saved option or changes its provider route/account
+configuration, that session fails visibly rather than silently falling back.
+Restore the option/configuration to continue it. Older runtimes do not understand
+the saved choice and their provider binding check refuses a different model;
+downgrading is not a model migration.
+
+Tests use real ACP subprocesses with a deterministic local provider. They cover
+durability, current-call exclusion, connection isolation, unchanged configuration,
+text retention and refusal of opaque history. Real provider acceptance remains
+specific to the configured model/account.
+
 ## Workspace roots
 
 `sessionCapabilities.additionalDirectories: {}` is advertised. A session's effective filesystem roots are its `cwd` plus the explicitly requested `additionalDirectories`. Relative paths always start at `cwd`.
