@@ -25,6 +25,9 @@ pub struct Config {
     #[schemars(skip)]
     pub client_form_elicitation: bool,
     pub provider: Provider,
+    /// Explicit same-route choices; never a model discovery or entitlement claim.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_options: Vec<crate::model_selection::ModelOption>,
     pub limits: Limits,
     pub mode: Mode,
     /// Owner-controlled command networking, independent of filesystem grants.
@@ -300,6 +303,7 @@ impl Config {
             session_roots: None,
             client_form_elicitation: false,
             provider: Provider::preset(ProviderKind::Openai, model),
+            model_options: vec![],
             limits: Limits {
                 max_model_calls: 16,
                 max_tool_calls: 48,
@@ -328,6 +332,7 @@ impl Config {
     }
     pub fn validate(&self, home: &Path) -> Result<()> {
         crate::model_policy::validate(&self.provider)?;
+        crate::model_selection::validate_options(self, home)?;
         ensure!(
             self.command_network == CommandNetwork::Isolated || cfg!(target_os = "linux"),
             "Inherited command networking is currently supported on Linux only"
