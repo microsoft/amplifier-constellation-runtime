@@ -9,6 +9,38 @@ This is a local reusable capability, not an extension to the ACP specification.
 An ACP host can expose it through MCP to any compatible agent implementation.
 The first host is Minecraft; the policy also has software and workshop fixtures.
 
+## Explicit task limits (helper v2)
+
+Runtime 0.14 exposes static local discovery through `agent-runtime
+helper-capabilities`, without a home, account or model. Require
+`schema_version: 1`, `helpers.watch.version: 2`, `command: "watch-v2"`, and
+`bound_kinds` containing `finite` and `no_configured_bound` before sending v2.
+This does not add ACP fields or imply any runtime family owns the task.
+
+`agent-runtime watch-v2 --store watches.json input.json` keeps the original
+operations/evidence format, but each `task.deadline_ms` and
+`task.remaining_turns` is explicitly `{"kind":"finite","value":123}` or
+`{"kind":"no_configured_bound"}`. A finite deadline is absolute Unix
+milliseconds; turns are the remaining allowance. Zero is exhausted, not a
+sentinel. Missing, null, unknown and contradictory bounds are rejected. Use the
+[v2 fixture](../examples/helpers/watch-v2.json) for a task with no configured
+deadline and a finite remaining turn limit.
+
+An authorized task may have either or both limits deliberately unconfigured;
+its identity and running/waiting status are still required. Watches always have
+their original finite 30–1800 second TTL. A finite task deadline further caps
+that TTL. Removing a task bound does not extend any saved watch, change its
+identity, rearm expired/cancelled watches, reset decision accounting or erase
+notifications/cursors. Old and new helpers share the existing store format.
+Only the task's owner may supply these facts; they do not create or amend work.
+Provider/tool limits, Stop and action leases remain independent constraints.
+
+The original `watch` command still requires numeric finite limits and retains
+policy `responsibility-watch-v7`; v2 changes the input representation, not the
+watch evaluator. An older helper cannot represent an unconfigured dimension:
+do not substitute a large number, fresh deadline or invented allowance. Report
+the missing capability, or use another explicitly supported observation path.
+
 ## Useful means
 
 The development goal is satisfied by a practical first increment when:

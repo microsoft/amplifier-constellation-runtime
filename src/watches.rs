@@ -1,6 +1,7 @@
 //! Persistent, agent-authored attention watches. No experience actions, tool
 //! permissions, planner calls, or model transport live in this module.
 use crate::decisions::{OptionText, Question, Request};
+use crate::task_bounds::Bound;
 use anyhow::{Context, Result, ensure};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -121,11 +122,39 @@ pub struct Task {
     pub deadline_ms: u64,
     pub remaining_turns: u32,
 }
-impl Task {
+/// The v2 helper takes explicit limits; the original numeric Task stays intact.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskV2 {
+    pub id: String,
+    pub goal: String,
+    pub status: String,
+    pub deadline_ms: Bound<u64>,
+    pub remaining_turns: Bound<u32>,
+}
+impl From<Task> for TaskV2 {
+    fn from(task: Task) -> Self {
+        Self {
+            id: task.id,
+            goal: task.goal,
+            status: task.status,
+            deadline_ms: Bound::Finite {
+                value: task.deadline_ms,
+            },
+            remaining_turns: Bound::Finite {
+                value: task.remaining_turns,
+            },
+        }
+    }
+}
+impl TaskV2 {
     fn active(&self, now: u64) -> bool {
         matches!(self.status.as_str(), "running" | "waiting")
-            && self.deadline_ms > now
-            && self.remaining_turns > 0
+            && match self.deadline_ms {
+                Bound::Finite { value } => value > now,
+                Bound::NoConfiguredBound {} => true,
+            }
+            && self.remaining_turns.permits_at_least(1)
     }
 }
 
@@ -230,9 +259,9 @@ pub enum Action {
 /// never taken from tool arguments authored by an agent or an incoming message.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Input {
+pub struct Input<T = Task> {
     pub scope: String,
-    pub task: Option<Task>,
+    pub task: Option<T>,
     pub events: Vec<Event>,
     pub action: Action,
 }
@@ -322,7 +351,7 @@ fn view(w: &Watch) -> Value {
 }
 
 impl Store {
-    fn update(&mut self, input: Input, now: u64) -> Result<Value> {
+    fn update<T: Into<TaskV2>>(&mut self, input: Input<T>, now: u64) -> Result<Value> {
         ensure!(
             !input.scope.is_empty() && input.scope.len() <= 200,
             "Supply a bounded scope identifier"
@@ -363,7 +392,8 @@ impl Store {
                 );
             }
         }
-        let active = input.task.as_ref().filter(|t| t.active(now));
+        let task = input.task.map(Into::into);
+        let active = task.as_ref().filter(|t| t.active(now));
         for w in &mut self.watches {
             if matches!(w.status.as_str(), "armed" | "triggered") {
                 if active.is_none_or(|t| t.id != w.task_id) {
@@ -467,7 +497,9 @@ impl Store {
                 let w = Watch {
                     id: uuid::Uuid::new_v4().to_string(),
                     task_id: task.id.clone(),
-                    expires_ms: task.deadline_ms.min(now + spec.ttl_seconds * 1000),
+                    expires_ms: task
+                        .deadline_ms
+                        .cap(now.saturating_add(spec.ttl_seconds * 1000)),
                     created_ms: now,
                     spec,
                     status: "armed".into(),
@@ -801,7 +833,7 @@ impl Store {
     }
 }
 
-pub fn apply(path: &Path, input: Input, now: u64) -> Result<Value> {
+pub fn apply<T: Into<TaskV2>>(path: &Path, input: Input<T>, now: u64) -> Result<Value> {
     let parent = path
         .parent()
         .context("Watch store needs a parent directory")?;
@@ -834,11 +866,22 @@ pub fn apply(path: &Path, input: Input, now: u64) -> Result<Value> {
 }
 
 pub fn from_file(path: &Path, file: &Path) -> Result<Value> {
+    from_file_typed::<Task>(path, file)
+}
+
+pub fn from_file_v2(path: &Path, file: &Path) -> Result<Value> {
+    from_file_typed::<TaskV2>(path, file)
+}
+
+fn from_file_typed<T: serde::de::DeserializeOwned + Into<TaskV2>>(
+    path: &Path,
+    file: &Path,
+) -> Result<Value> {
     ensure!(
         fs::metadata(file)?.len() <= 64 * 1024,
         "Watch input exceeds 64 KiB"
     );
-    let input = serde_json::from_slice(&fs::read(file)?)?;
+    let input: Input<T> = serde_json::from_slice(&fs::read(file)?)?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_millis() as u64;

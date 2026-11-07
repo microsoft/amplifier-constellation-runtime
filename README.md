@@ -139,6 +139,12 @@ Any use of third-party trademarks or logos are subject to those third-party's po
 
 See [bounded continuation advice](docs/continuation.md) for receipt-based recovery and remaining-budget checks, and [attention watches](docs/watches.md) for current-state and exact-predicate contracts. Both are optional host helpers; standard ACP agents remain independent.
 
+Runtime 0.14 adds static `helper-capabilities` discovery and explicit task limits
+through `watch-v2` and `continuation-v2`. A finite limit and deliberately no
+configured limit are distinct; missing/unknown values are rejected. The original
+numeric helper commands and persisted watches remain compatible. This does not
+change existing task authority or the connected agent's model/runtime family.
+
 ### Inspecting and sharing local images
 
 `workspace_view_image` reads a PNG/JPEG/GIF/WebP inside the session's granted

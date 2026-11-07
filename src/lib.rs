@@ -21,6 +21,7 @@ pub mod rpc;
 pub mod server;
 pub mod steering;
 pub mod store;
+pub mod task_bounds;
 pub mod tools;
 pub mod watches;
 

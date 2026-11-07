@@ -40,6 +40,7 @@ jobs:
           COMMAND_TEST_SECRET: must-not-reach-the-command
           COMMAND_TEST_TOKEN: must-not-reach-the-command
       - run: cargo build --locked
+      - run: python tests/helper_bounds.py
       - run: python tests/container_commands.py
         if: runner.os == 'Linux'
       - run: python tests/steering.py
