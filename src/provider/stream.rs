@@ -56,6 +56,7 @@ pub struct Collector {
     kind: ProviderKind,
     text: String,
     thinking: String,
+    reasoning_field: Option<&'static str>,
     calls: BTreeMap<u64, Value>,
     blocks: BTreeMap<u64, Value>,
     arguments: BTreeMap<u64, String>,
@@ -73,6 +74,7 @@ impl Collector {
             kind,
             text: String::new(),
             thinking: String::new(),
+            reasoning_field: None,
             calls: BTreeMap::new(),
             blocks: BTreeMap::new(),
             arguments: BTreeMap::new(),
@@ -126,7 +128,23 @@ impl Collector {
                         self.text.push_str(s);
                         text.push(s.into());
                     }
-                    if let Some(s) = delta["reasoning_content"].as_str() {
+                    // vLLM renamed reasoning_content to reasoning. Preserve the
+                    // observed wire field privately for the next tool continuation.
+                    // A compatibility server may send both aliases; select once.
+                    let reasoning = delta["reasoning"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .map(|s| ("reasoning", s))
+                        .or_else(|| {
+                            delta["reasoning_content"]
+                                .as_str()
+                                .filter(|s| !s.is_empty())
+                                .map(|s| ("reasoning_content", s))
+                        });
+                    if let Some((field, s)) = reasoning {
+                        if self.reasoning_field.is_none() || field == "reasoning" {
+                            self.reasoning_field = Some(field);
+                        }
                         self.thinking.push_str(s);
                     }
                     if let Some(calls) = delta["tool_calls"].as_array() {
@@ -396,7 +414,7 @@ impl Collector {
                     m[if self.kind == ProviderKind::Ollama {
                         "thinking"
                     } else {
-                        "reasoning_content"
+                        self.reasoning_field.unwrap_or("reasoning_content")
                     }] = json!(self.thinking);
                 }
                 if !self.calls.is_empty() {

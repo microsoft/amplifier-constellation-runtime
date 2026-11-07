@@ -35,7 +35,7 @@ class Handler(ResponsesWebSocketMixin, BaseHTTPRequestHandler):
         elif kind in ['chat-completions','litellm']:
             if tool:
                 args=json.dumps(ARGS)
-                events=[{'choices':[{'delta':{'reasoning_content':PRIVATE,'tool_calls':[{'index':0,'id':'call-1','type':'function','function':{'name':'workspace_write','arguments':args[:12]}}]},'finish_reason':None}]},
+                events=[{'choices':[{'delta':{case.get('reasoning_field','reasoning_content'):PRIVATE,**case.get('reasoning_extra',{}),'tool_calls':[{'index':0,'id':'call-1','type':'function','function':{'name':'workspace_write','arguments':args[:12]}}]},'finish_reason':None}]},
                         {'choices':[{'delta':{'tool_calls':[{'index':0,'function':{'arguments':args[12:]}}]},'finish_reason':reason or 'tool_calls'}]}]
             else:events=[{'choices':[{'delta':{'content':'Verified café'},'finish_reason':'stop'}]}]
             events.append({'choices':[],'usage':{'prompt_tokens':20,'completion_tokens':10}})
@@ -125,6 +125,32 @@ class Tests(unittest.TestCase):
                 self.assertEqual(self.prompt(c,sid,'recall')['result']['stopReason'],'end_turn');self.assertEqual(len(self.server.case['requests']),3)
                 if kind in ['anthropic','gemini','ollama','chat-completions','litellm']:self.assertIn(PRIVATE,json.dumps(self.server.case['requests'][2][1]))
                 self.close(c);(self.work/'provider-proof.txt').unlink()
+    def test_chat_reasoning_alias_survives_tools_and_reload_privately(self):
+        cases=[('reasoning',{}),('reasoning_content',{}),
+               ('reasoning',{'reasoning_content':PRIVATE}),
+               ('reasoning_content',{'reasoning':None}),
+               ('reasoning_content',{'reasoning':''})]
+        for kind in ['chat-completions','litellm']:
+            for field,extra in cases:
+                with self.subTest(kind=kind,field=field,extra=extra):
+                    self.setup_kind(kind,reasoning_field=field,reasoning_extra=extra)
+                    c=self.client();sid=c.call('session/new',{'cwd':str(self.work),'mcpServers':[]})['result']['sessionId']
+                    self.assertEqual(self.prompt(c,sid)['result']['stopReason'],'end_turn')
+                    self.assertEqual((self.work/'provider-proof.txt').read_text(encoding='utf-8'),'verified café\n')
+                    message=self.server.case['requests'][1][1]['messages'][2]
+                    self.assertEqual(message.get(field),PRIVATE)
+                    other='reasoning_content' if field=='reasoning' else 'reasoning'
+                    self.assertNotIn(other,message)
+                    self.assertNotIn(PRIVATE,json.dumps(c.updates))
+                    self.close(c);c=self.client()
+                    c.call('session/load',{'sessionId':sid,'cwd':str(self.work),'mcpServers':[]})
+                    self.assertNotIn(PRIVATE,json.dumps(c.updates))
+                    self.assertEqual(self.prompt(c,sid,'recall')['result']['stopReason'],'end_turn')
+                    messages=self.server.case['requests'][2][1]['messages']
+                    self.assertTrue(any(m.get(field)==PRIVATE for m in messages))
+                    self.assertEqual(len(c.callbacks),0,'reload must not replay the earlier effect')
+                    self.close(c);(self.work/'provider-proof.txt').unlink()
+
     def test_truncated_streams_never_execute_tools(self):
         for kind in KINDS:
             with self.subTest(kind=kind):
