@@ -1,15 +1,16 @@
 //! Domain-independent continuation advice from trusted host receipts. This does
 //! not execute, replay, authorize, or renew work. Experiences enforce the result.
+use crate::task_bounds::Bound;
 use anyhow::{Result, ensure};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Input {
+pub struct Input<Time = u64, Turns = u32> {
     pub status: String,
-    pub remaining_ms: u64,
-    pub remaining_turns: u32,
+    pub remaining_ms: Time,
+    pub remaining_turns: Turns,
     pub minimum_turn_ms: u64,
     pub idle: bool,
     pub observation_current: bool,
@@ -19,13 +20,40 @@ pub struct Input {
 }
 
 pub fn assess(i: Input) -> Result<Value> {
+    assess_bounds(
+        Input {
+            status: i.status,
+            remaining_ms: Bound::Finite {
+                value: i.remaining_ms,
+            },
+            remaining_turns: Bound::Finite {
+                value: i.remaining_turns,
+            },
+            minimum_turn_ms: i.minimum_turn_ms,
+            idle: i.idle,
+            observation_current: i.observation_current,
+            receipts_complete: i.receipts_complete,
+            actions_succeeded: i.actions_succeeded,
+            recovery_attempts: i.recovery_attempts,
+        },
+        "bounded-continuation/1",
+    )
+}
+
+pub fn assess_v2(i: Input<Bound<u64>, Bound<u32>>) -> Result<Value> {
+    assess_bounds(i, "bounded-continuation/2")
+}
+
+fn assess_bounds(i: Input<Bound<u64>, Bound<u32>>, policy: &str) -> Result<Value> {
     ensure!(
         (1000..=600_000).contains(&i.minimum_turn_ms),
         "Invalid minimum turn duration"
     );
     let (action, reason) = if !["running", "waiting", "needs_review"].contains(&i.status.as_str()) {
         ("hold", "task_not_active")
-    } else if i.remaining_turns == 0 || i.remaining_ms < i.minimum_turn_ms {
+    } else if !i.remaining_turns.permits_at_least(1)
+        || !i.remaining_ms.permits_at_least(i.minimum_turn_ms)
+    {
         ("checkpoint", "insufficient_budget")
     } else if !i.idle || !i.observation_current {
         ("hold", "observation_not_settled")
@@ -40,10 +68,8 @@ pub fn assess(i: Input) -> Result<Value> {
     } else {
         ("continue", "active_budget")
     };
-    Ok(
-        json!({"policy":"bounded-continuation/1","action":action,"reason":reason,
-        "authority":"existing_task_only","replay_actions":false,"extend_budget":false}),
-    )
+    Ok(json!({"policy":policy,"action":action,"reason":reason,
+        "authority":"existing_task_only","replay_actions":false,"extend_budget":false}))
 }
 
 #[cfg(test)]

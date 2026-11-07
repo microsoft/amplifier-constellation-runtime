@@ -1,0 +1,20 @@
+{
+  "scope": "example-project",
+  "task": {
+    "id": "existing-assignment",
+    "goal": "Finish the accepted project",
+    "status": "waiting",
+    "deadline_ms": {"kind": "no_configured_bound"},
+    "remaining_turns": {"kind": "finite", "value": 4}
+  },
+  "events": [],
+  "action": {
+    "operation": "arm",
+    "spec": {
+      "label": "Peer review",
+      "condition": "The peer supplies the requested review result.",
+      "kinds": ["message"],
+      "ttl_seconds": 300
+    }
+  }
+}

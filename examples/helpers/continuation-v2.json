@@ -1,0 +1,11 @@
+{
+  "status": "running",
+  "remaining_ms": {"kind": "no_configured_bound"},
+  "remaining_turns": {"kind": "no_configured_bound"},
+  "minimum_turn_ms": 120000,
+  "idle": true,
+  "observation_current": true,
+  "receipts_complete": true,
+  "actions_succeeded": true,
+  "recovery_attempts": 0
+}

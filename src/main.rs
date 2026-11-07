@@ -16,8 +16,14 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Discover local helper input versions; no installation or model is used.
+    HelperCapabilities,
     /// Classify continuation from trusted host observations; never executes work.
     Continuation {
+        file: PathBuf,
+    },
+    /// Continuation advice with explicit finite or no-configured task limits.
+    ContinuationV2 {
         file: PathBuf,
     },
     Init {
@@ -81,6 +87,12 @@ enum Command {
     },
     /// Manage bounded agent-authored attention watches; provider calls are separate.
     Watch {
+        #[arg(long)]
+        store: PathBuf,
+        file: PathBuf,
+    },
+    /// Watches with explicit task bounds; each watch still has a finite TTL.
+    WatchV2 {
         #[arg(long)]
         store: PathBuf,
         file: PathBuf,
@@ -188,6 +200,23 @@ impl ProviderOptions {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    if matches!(args.command, Command::HelperCapabilities) {
+        println!("{}", agent_runtime::task_bounds::helper_capabilities());
+        return Ok(());
+    }
+    if let Command::ContinuationV2 { file } = &args.command {
+        ensure!(
+            std::fs::metadata(file)?.len() <= 16384,
+            "Continuation input too large"
+        );
+        let input = serde_json::from_slice(&std::fs::read(file)?)?;
+        println!("{}", agent_runtime::continuation::assess_v2(input)?);
+        return Ok(());
+    }
+    if let Command::WatchV2 { store, file } = &args.command {
+        println!("{}", agent_runtime::watches::from_file_v2(store, file)?);
+        return Ok(());
+    }
     if let Command::Continuation { file } = &args.command {
         ensure!(
             std::fs::metadata(file)?.len() <= 16384,
@@ -448,6 +477,9 @@ async fn main() -> Result<()> {
         | Command::Assess { .. }
         | Command::Watch { .. }
         | Command::Continuation { .. }
+        | Command::HelperCapabilities
+        | Command::WatchV2 { .. }
+        | Command::ContinuationV2 { .. }
         | Command::Capabilities
         | Command::ConfigureCapabilities { .. } => {
             unreachable!()
