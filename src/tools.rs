@@ -46,7 +46,7 @@ fn definitions_for_boundary(
         ),
         definition(
             "workspace_attach_image",
-            "Attach a saved PNG, JPEG, GIF or WebP image from the granted workspace to your current conversation as an ACP image. Use when the user requests sharing/showing that image. This sends the bytes to this client; it does not select or post to another channel. Maximum 2 MiB.",
+            "Attach a saved PNG, JPEG, GIF or WebP image from the granted workspace to your current conversation as ACP response output. Use when the user requests sharing/showing that image. Available in every session mode; it reads the file without changing it. This sends the bytes to this client; it does not select or post to another channel. Maximum 2 MiB.",
             json!({"path":{"type":"string"}}),
             vec!["path"],
         ),
@@ -163,9 +163,11 @@ fn macos_profile(roots: &[PathBuf], scratch: &Path) -> Result<String> {
     ))
 }
 pub fn mutation(name: &str) -> bool {
+    // Explicit attachments are response output from already granted roots.
+    // Viewing an image or receiving one from MCP never publishes it implicitly.
     matches!(
         name,
-        "workspace_write" | "workspace_run" | "workspace_save_artifact" | "workspace_attach_image"
+        "workspace_write" | "workspace_run" | "workspace_save_artifact"
     )
 }
 fn relative(c: &Config, cwd: &Path, input: &str) -> Result<(PathBuf, PathBuf)> {

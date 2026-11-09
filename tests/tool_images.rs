@@ -27,7 +27,7 @@ async fn workspace_images_require_scope_and_explicit_attachment() {
     .unwrap();
     assert_eq!(sent["_acp_content"][0]["data"], STANDARD.encode(png()));
     assert!(sent["_tool_images"].is_null());
-    assert!(tools::mutation("workspace_attach_image"));
+    assert!(!tools::mutation("workspace_attach_image"));
     assert!(!tools::mutation("workspace_view_image"));
     for path in [
         "../private.png".to_string(),
@@ -50,6 +50,16 @@ async fn workspace_images_require_scope_and_explicit_attachment() {
         tools::call(&c, &w, "workspace_view_image", &json!({"path":"huge.png"}))
             .await
             .is_err()
+    );
+    assert!(
+        tools::call(
+            &c,
+            &w,
+            "workspace_attach_image",
+            &json!({"path":"huge.png"})
+        )
+        .await
+        .is_err()
     );
     #[cfg(unix)]
     {
