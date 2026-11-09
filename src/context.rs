@@ -273,7 +273,7 @@ pub fn prepare(
 pub const SNAPSHOT_META: &str = "com.microsoft.amplifier.context-snapshot";
 pub fn refreshed_view(items: &[Value]) -> Vec<Value> {
     let mut seen = std::collections::HashSet::new();
-    let mut view = items.to_vec();
+    let mut view = crate::mcp::model_view(items);
     for item in view.iter_mut().rev() {
         if item["role"] != "user" {
             continue;

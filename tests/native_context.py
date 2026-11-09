@@ -24,7 +24,8 @@ class Handler(ResponsesWebSocketMixin,BaseHTTPRequestHandler):
             if len(json.dumps(body['input'])) > 100000:
                 return self.reply({'error':{'code':'context_length_exceeded'}},400)
             retained=body['input'][0]['content'] if self.server.retain_large_input else 'canonical retained item'
-            return self.reply({'output':[{'role':'user','content':retained},{'type':'compaction','encrypted_content':'PRIVATE_OPAQUE'}],'usage':{'input_tokens':14000,'output_tokens':200}})
+            window=getattr(self.server,'mcp_window',None)
+            return self.reply({'output':window if window is not None else [{'role':'user','content':retained},{'type':'compaction','encrypted_content':'PRIVATE_OPAQUE'}],'usage':{'input_tokens':14000,'output_tokens':200}})
         if body.get('compaction'):
             if 'output_config' in body and not isinstance(body['output_config'],dict):
                 return self.reply({'error':{'type':'invalid_request_error','message':'output_config must be an object'}},400)
@@ -130,6 +131,27 @@ class Tests(unittest.TestCase):
         self.c.call('session/load',{'sessionId':self.sid,'cwd':str(self.work),'mcpServers':[]})
         self.assertEqual(self.prompt('Small continuation')['result']['stopReason'],'end_turn')
         self.assertEqual(len([1 for p,b in self.server.requests if p.endswith('/compact')]),1)
+
+    def test_restored_mcp_window_budgets_unique_facts_but_keeps_canonical_checkpoint(self):
+        facts={'receipt':'retained-'+('x'*36000),'submitted':True,'recipient_delivery_verified':False}
+        envelope={'content':[{'type':'text','text':json.dumps(facts,separators=(',',':'))}], 'structuredContent':facts,'isError':False}
+        window=[{'role':'user','content':'Retained request'},
+                {'type':'function_call','call_id':'fixture-read','name':'mcp_0_receipt','arguments':'{}'},
+                {'type':'function_call_output','call_id':'fixture-read','output':json.dumps(envelope,separators=(',',':'))},
+                {'type':'compaction','encrypted_content':'PRIVATE_OPAQUE'}]
+        self.server.mcp_window=window;self.start('openai')
+        self.assertEqual(self.prompt('Original '+('x'*50000))['result']['stopReason'],'end_turn')
+        self.c.close();self.c=protocol.Client(self.home);self.c.call('initialize',{'protocolVersion':1,'clientCapabilities':{}})
+        self.c.call('session/load',{'sessionId':self.sid,'cwd':str(self.work),'mcpServers':[]})
+        self.assertEqual(self.prompt('Clarify this established receipt')['result']['stopReason'],'end_turn')
+        self.assertEqual(len([1 for p,b in self.server.requests if p.endswith('/compact')]),1)
+        for _,body in [(p,b) for p,b in self.server.requests if p=='/responses']:
+            result=json.loads(next(i['output'] for i in body['input'] if i.get('type')=='function_call_output'))
+            self.assertEqual(result['content'],[]);self.assertEqual(result['structuredContent'],facts)
+        with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:
+            checkpoint=json.loads(db.execute("SELECT data FROM context_checkpoints WHERE data LIKE '%provider_native%'").fetchone()[0])
+        self.assertEqual(checkpoint['model_items'],window)
+        self.assertFalse(self.c.callbacks)
 
     def test_anthropic_negotiates_and_preserves_exact_signed_block_and_stable_prefix(self):
         self.start('anthropic')

@@ -18,6 +18,16 @@ be compacted, and the original transcript remains available through
 reports the capacity failure instead of silently removing its observations.
 
 The saved transcript stays intact. Model requests use a separate working window.
+For recorded MCP calls, that window omits a text fallback only when its entire
+text is byte-identical to the serialized `structuredContent` object and the
+block has no annotations or other fields. Structured facts, other text, media,
+errors and unknown fields remain. Both copies stay in the original transcript
+and ACP receipts. Context budgeting counts this projected view, including after
+reload; no model summary or extra request is needed. Alternate formatting and
+unmatched or ambiguous tool calls keep their original output.
+An incremental continuation containing a result without its corresponding call
+also keeps both copies; this optimization never guesses missing call identity.
+
 When an older session has no valid native checkpoint, the runtime first applies
 the existing bounded archive projection and producer-declared snapshot refreshes.
 This prevents a switch to native compaction from submitting an oversized full
