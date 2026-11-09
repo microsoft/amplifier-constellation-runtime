@@ -149,8 +149,12 @@ change existing task authority or the connected agent's model/runtime family.
 
 `workspace_view_image` reads a PNG/JPEG/GIF/WebP inside the session's granted
 workspace and gives the model visual evidence. `workspace_attach_image` explicitly
-attaches that saved image to the current ACP conversation (maximum 2 MiB). It
-follows the session's write/approval policy; viewing an image does not publish it.
+attaches that saved image to the current ACP conversation (maximum 2 MiB). From
+0.15.2, this explicit attachment is response output in every session mode,
+including read-only and ask, and needs no separate write approval. It reads an
+already permitted file without changing it. Workspace roots, image validation
+and the size limit still apply; viewing an image does not publish it. File
+writes, commands and external tool effects retain their existing permissions.
 The ACP client decides how attachments are displayed or delivered, such as a
 Slack file upload. The runtime does not choose another destination or fetch a
 remote URL when attaching.

@@ -1,5 +1,5 @@
 """Real ACP/MCP roundtrip: observe a tool image, explicitly attach it, then reload."""
-import base64,json,subprocess,tempfile,threading,unittest
+import base64,json,os,subprocess,tempfile,threading,unittest
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from protocol import Client,BINARY
@@ -17,13 +17,19 @@ class Handler(ResponsesWebSocketMixin, BaseHTTPRequestHandler):
    r={'protocolVersion':'2025-06-18','capabilities':{'tools':{}},'serverInfo':{'name':'camera','version':'1'}} if m=='initialize' else {'tools':[{'name':'picture','description':'Observe an image','inputSchema':{'type':'object','properties':{}},'annotations':{'readOnlyHint':True}}]} if m=='tools/list' else {'content':[{'type':'text','text':'Image saved at view.png'},IMAGE],'_acp_content':[IMAGE]}
    self.send_response(200);self.send_header('Content-Type','application/json');self.end_headers();self.wfile.write(json.dumps({'jsonrpc':'2.0','id':b['id'],'result':r}).encode());return
   self.server.requests.append(b);done=[x for x in b['input'] if x.get('type')=='function_call_output']
-  if not done:out=[{'type':'function_call','call_id':'capture','name':next(t['name'] for t in b['tools'] if t['name'].startswith('mcp_')),'arguments':'{}'}]
+  if hasattr(self.server,'actions'):
+   if len(done)<len(self.server.actions):
+    action=self.server.actions[len(done)].copy()
+    if action['name']=='fixture_mcp':action['name']=next(t['name'] for t in b['tools'] if t['name'].startswith('mcp_'))
+    out=[{'type':'function_call','call_id':'action-'+str(len(done)),**action}]
+   else:out=[{'type':'message','role':'assistant','content':[{'type':'output_text','text':'Finished.'}]}]
+  elif not done:out=[{'type':'function_call','call_id':'capture','name':next(t['name'] for t in b['tools'] if t['name'].startswith('mcp_')),'arguments':'{}'}]
   elif len(done)==1:out=[{'type':'function_call','call_id':'attach','name':'workspace_attach_image','arguments':json.dumps({'path':'view.png'})}]
   else:out=[{'type':'message','role':'assistant','content':[{'type':'output_text','text':'Finished.'}]}]
   self.send_response(200);self.send_header('Content-Type','text/event-stream');self.end_headers();self.wfile.write(('data: '+json.dumps({'type':'response.completed','response':{'status':'completed','output':out,'usage':{'input_tokens':1,'output_tokens':1}}})+'\n\n').encode())
 class Tests(unittest.TestCase):
  def test_observation_attachment_permissions_and_restart(self):
-  for mode in ['workspace','read_only']:
+  for mode in ['workspace','read_only','ask']:
    with self.subTest(mode=mode),tempfile.TemporaryDirectory() as d:
     srv=ThreadingHTTPServer(('127.0.0.1',0),Handler);srv.requests=[];srv.mcp_methods=[];threading.Thread(target=srv.serve_forever,daemon=True).start()
     home=Path(d)/'state';work=Path(d)/'work';subprocess.run([str(BINARY),'--home',str(home),'init','--workspace',str(work),'--model','fixture'],check=True,stdout=subprocess.DEVNULL)
@@ -35,7 +41,8 @@ class Tests(unittest.TestCase):
      c.call('initialize',{'protocolVersion':1,'clientCapabilities':{}});sid=c.call('session/new',{'cwd':str(work),'mcpServers':mcp})['result']['sessionId']
      result=c.call('session/prompt',{'sessionId':sid,'prompt':[{'type':'text','text':'Show this saved view.'}]});self.assertNotIn('error',result)
      updates=[u['params']['update'] for u in c.updates];sent=[u for u in updates if u.get('sessionUpdate')=='agent_message_chunk' and u.get('content',{}).get('type')=='image']
-     self.assertEqual(len(sent),1 if mode=='workspace' else 0)
+     self.assertEqual(len(sent),1)
+     self.assertEqual(c.callbacks,[])
      if sent:self.assertEqual(base64.b64decode(sent[0]['content']['data']),PNG)
      second=srv.requests[1]['input'];self.assertTrue(any(p.get('type')=='input_image' for v in second for p in v.get('content',[]) if isinstance(p,dict)))
      self.assertNotIn(IMAGE['data'],next(v['output'] for v in second if v.get('type')=='function_call_output'))
@@ -46,4 +53,57 @@ class Tests(unittest.TestCase):
      c.call('initialize',{'protocolVersion':1,'clientCapabilities':{}});c.call('session/load',{'sessionId':sid,'cwd':str(work),'mcpServers':mcp})
      updates=[u['params']['update'] for u in c.updates];self.assertFalse(any(u.get('sessionUpdate')=='agent_message_chunk' and u.get('content',{}).get('type')=='image' for u in updates));self.assertTrue(any(u.get('sessionUpdate')=='tool_call_update' and any(v.get('content',{}).get('type')=='image' for v in u.get('content',[])) for u in updates));self.assertEqual(count,len(srv.requests));self.assertEqual(srv.mcp_methods.count('tools/call'),1)
     finally:c.close();srv.shutdown();srv.server_close()
+ def fixture(self,d,mode,actions,trust=True):
+  srv=ThreadingHTTPServer(('127.0.0.1',0),Handler);srv.requests=[];srv.mcp_methods=[];srv.actions=actions;threading.Thread(target=srv.serve_forever,daemon=True).start()
+  self.addCleanup(srv.server_close);self.addCleanup(srv.shutdown)
+  home=Path(d)/'state';work=Path(d)/'work';subprocess.run([str(BINARY),'--home',str(home),'init','--workspace',str(work),'--model','fixture'],check=True,stdout=subprocess.DEVNULL)
+  (work/'view.png').write_bytes(PNG);url=f'http://127.0.0.1:{srv.server_port}'
+  config=json.loads((home/'runtime.json').read_text());config['mode']=mode;config['trusted_mcp_readonly_urls']=[url+'/mcp'] if trust else [];config['provider'].update(endpoint=url+'/responses',api_key_env='RUNTIME_FIXTURE_KEY',reasoning_effort=None);(home/'runtime.json').write_text(json.dumps(config))
+  c=Client(home);self.addCleanup(c.close)
+  c.call('initialize',{'protocolVersion':1,'clientCapabilities':{}});sid=c.call('session/new',{'cwd':str(work),'mcpServers':[{'type':'http','name':'camera','url':url+'/mcp','headers':[]}]})['result']['sessionId']
+  return srv,home,work,c,sid
+ def prompt_images(self,c,sid):
+  result=c.call('session/prompt',{'sessionId':sid,'prompt':[{'type':'text','text':'Show the requested saved image in this conversation.'}]})
+  self.assertNotIn('error',result)
+  return [u['params']['update'] for u in c.updates if u['params']['update'].get('sessionUpdate')=='agent_message_chunk' and u['params']['update'].get('content',{}).get('type')=='image']
+ def test_image_output_does_not_authorize_writes_or_external_tools(self):
+  for mode in ['ask','read_only']:
+   with self.subTest(mode=mode),tempfile.TemporaryDirectory() as d:
+    actions=[{'name':'workspace_attach_image','arguments':json.dumps({'path':'view.png'})},{'name':'workspace_write','arguments':json.dumps({'path':'blocked.txt','content':'must not be written'})},{'name':'fixture_mcp','arguments':'{}'}]
+    srv,home,work,c,sid=self.fixture(d,mode,actions,trust=False)
+    try:
+     config=(home/'runtime.json').read_bytes();before=(work/'view.png').read_bytes()
+     sent=self.prompt_images(c,sid);self.assertEqual(len(sent),1);self.assertEqual(base64.b64decode(sent[0]['content']['data']),PNG)
+     self.assertFalse((work/'blocked.txt').exists());self.assertEqual(srv.mcp_methods.count('tools/call'),0)
+     self.assertEqual(len(c.callbacks),2 if mode=='ask' else 0)
+     self.assertEqual((home/'runtime.json').read_bytes(),config);self.assertEqual((work/'view.png').read_bytes(),before)
+     failed=[u['params']['update']['toolCallId'] for u in c.updates if u['params']['update'].get('sessionUpdate')=='tool_call_update' and u['params']['update'].get('status')=='failed']
+     self.assertEqual(failed,['action-1','action-2'])
+    finally:
+     self.doCleanups()
+ def test_view_and_mcp_observations_do_not_publish(self):
+  with tempfile.TemporaryDirectory() as d:
+   actions=[{'name':'workspace_view_image','arguments':json.dumps({'path':'view.png'})},{'name':'fixture_mcp','arguments':'{}'}]
+   srv,_,_,c,sid=self.fixture(d,'ask',actions)
+   try:
+    self.assertEqual(self.prompt_images(c,sid),[]);self.assertEqual(c.callbacks,[]);self.assertEqual(srv.mcp_methods.count('tools/call'),1)
+    cards=[u['params']['update'] for u in c.updates if u['params']['update'].get('sessionUpdate')=='tool_call_update' and any(v.get('content',{}).get('type')=='image' for v in u['params']['update'].get('content',[]))]
+    self.assertEqual(len(cards),2)
+   finally:self.doCleanups()
+ def test_attachment_validation_still_applies_without_approval(self):
+  with tempfile.TemporaryDirectory() as d:
+   outside=Path(d)/'private.png';outside.write_bytes(PNG)
+   paths=['../private.png',str(outside),'invalid.png','huge.png']
+   if os.name!='nt':paths.append('escape.png')
+   actions=[{'name':'workspace_attach_image','arguments':json.dumps({'path':p})} for p in paths]
+   _,_,work,c,sid=self.fixture(d,'read_only',actions)
+   try:
+    (work/'invalid.png').write_text('not image data');(work/'huge.png').write_bytes(PNG+b'0'*(2*1024*1024))
+    if os.name!='nt':(work/'escape.png').symlink_to(outside)
+    self.assertEqual(self.prompt_images(c,sid),[]);self.assertEqual(c.callbacks,[])
+    results=[u['params']['update'] for u in c.updates if u['params']['update'].get('sessionUpdate')=='tool_call_update' and u['params']['update'].get('status')=='failed']
+    self.assertEqual(len(results),len(paths));self.assertEqual(outside.read_bytes(),PNG)
+    errors=' '.join(json.dumps(v) for v in results)
+    self.assertIn('Parent traversal',errors);self.assertIn('outside this session',errors);self.assertIn('2 MiB',errors)
+   finally:self.doCleanups()
 if __name__=='__main__':unittest.main()
