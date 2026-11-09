@@ -12,6 +12,70 @@ use tokio::{
 const CANCEL_TIMEOUT: Duration = Duration::from_millis(500);
 const STDIO_CANCEL_GRACE: Duration = Duration::from_millis(100);
 
+/// Model-only projection of a redundant MCP JSON text fallback. The original
+/// result remains in the durable transcript and ACP tool receipts. Only a
+/// recorded MCP call can qualify; similarly shaped ordinary tool output cannot.
+/// Exact serialization equality deliberately leaves alternate formatting,
+/// annotations and unknown content fields alone rather than guessing semantics.
+pub fn model_view(items: &[Value]) -> Vec<Value> {
+    let mut calls = std::collections::HashMap::new();
+    for item in items.iter().filter(|item| item["type"] == "function_call") {
+        if let Some(id) = item["call_id"].as_str().filter(|id| !id.is_empty()) {
+            let is_mcp = item["name"].as_str().is_some_and(|name| {
+                name.strip_prefix("mcp_")
+                    .and_then(|rest| rest.split_once('_'))
+                    .is_some_and(|(index, tool)| {
+                        !index.is_empty()
+                            && index.bytes().all(|b| b.is_ascii_digit())
+                            && !tool.is_empty()
+                    })
+            });
+            // Ambiguous duplicate IDs never qualify, even if one name is MCP.
+            calls
+                .entry(id)
+                .and_modify(|unique| *unique = false)
+                .or_insert(is_mcp);
+        }
+    }
+    items
+        .iter()
+        .map(|item| {
+            if item["type"] != "function_call_output"
+                || item["call_id"]
+                    .as_str()
+                    .is_none_or(|id| calls.get(id) != Some(&true))
+            {
+                return item.clone();
+            }
+            let Some(output) = item["output"].as_str() else {
+                return item.clone();
+            };
+            let Ok(mut result) = serde_json::from_str::<Value>(output) else {
+                return item.clone();
+            };
+            let Some(structured) = result.get("structuredContent").filter(|v| v.is_object()) else {
+                return item.clone();
+            };
+            let canonical = structured.to_string();
+            let Some(content) = result.get_mut("content").and_then(Value::as_array_mut) else {
+                return item.clone();
+            };
+            let before = content.len();
+            content.retain(|block| {
+                !block.as_object().is_some_and(|object| {
+                    object.len() == 2 && block["type"] == "text" && block["text"] == canonical
+                })
+            });
+            if before == content.len() {
+                return item.clone();
+            }
+            let mut projected = item.clone();
+            projected["output"] = json!(result.to_string());
+            projected
+        })
+        .collect()
+}
+
 pub struct Tools {
     peers: Vec<Mutex<Connection>>,
     server_indices: Vec<usize>,

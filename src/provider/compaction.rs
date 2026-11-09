@@ -75,7 +75,7 @@ fn restored(
         if let Some(base) = c["model_items"].as_array() {
             let mut result = base.clone();
             result.extend_from_slice(&original[n..]);
-            let baseline = crate::media::context_bytes(base)?;
+            let baseline = crate::media::context_bytes(&crate::mcp::model_view(base))?;
             let newer_server_window = original[n..].iter().any(|v| v["type"] == "compaction");
             return Ok((
                 server_window(&original[n..], result),
@@ -155,6 +155,10 @@ impl Provider {
             items = view.items;
             checkpoint = view.checkpoint;
         }
+        // Count the same lossless client-tool view that provider serialization
+        // uses. The stored native checkpoint and opaque provider records remain
+        // unchanged; only correlated redundant MCP fallbacks can be omitted.
+        items = crate::mcp::model_view(&items);
         let bytes = crate::media::context_bytes(&items)?;
         // A canonical window can retain large user messages. Recompacting the
         // same window on every new prompt adds latency without reclaiming it.
@@ -210,7 +214,7 @@ impl Provider {
             let native_checkpoint = json!({"kind":"provider_native","prefix_items":original.len(),"prefix_sha256":digest(&original)?,"settings_sha256":settings,"model_items":window});
             store.checkpoint(sid, &provider, &native_checkpoint)?;
             checkpoint = None;
-            items = window;
+            items = crate::mcp::model_view(&window);
             self.context_tokens = 0;
             store.event(sid,Some(turn),"context.compacted",json!({"kind":"provider_native","input_bytes":bytes,"model_context_bytes":serde_json::to_vec(&items)?.len(),"elapsed_ms":started.elapsed().as_millis(),"usage":usage,"full_history_preserved":true}))?;
         }

@@ -19,6 +19,7 @@ class Handler(ResponsesWebSocketMixin, BaseHTTPRequestHandler):
             method=body.get('method')
             if method=='notifications/initialized':self.send_response(202);self.end_headers();return
             result={'protocolVersion':'2025-06-18','capabilities':{'tools':{}},'serverInfo':{'name':'fixture','version':'1'}} if method=='initialize' else {'tools':[{'name':'test_read','description':'Read fixture data','inputSchema':{'type':'object','properties':{},'additionalProperties':False},'annotations':{'readOnlyHint':True}}]} if method=='tools/list' else {'content':[{'type':'text','text':'scoped fixture evidence'}]}
+            if method=='tools/call' and getattr(self.server,'mcp_result',None) is not None:result=self.server.mcp_result
             self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Mcp-Session-Id','fixture-session');self.end_headers();self.wfile.write(json.dumps({'jsonrpc':'2.0','id':body['id'],'result':result}).encode());return
         if self.headers.get('Authorization') != 'Bearer fixture':
             self.send_response(401);self.end_headers();return
@@ -243,6 +244,36 @@ class Tests(unittest.TestCase):
         url=f'http://127.0.0.1:{self.server.server_port}/mcp'
         cfg=json.loads((self.home/'runtime.json').read_text());cfg['trusted_mcp_readonly_urls']=[url];(self.home/'runtime.json').write_text(json.dumps(cfg))
         c=self.client();s=self.new(c,[{'type':'http','name':'fixture','url':url,'headers':[]}]);self.prompt(c,s,'use mcp');self.assertTrue(any('scoped fixture evidence' in json.dumps(x) for x in c.updates));self.assertEqual(c.callbacks,[])
+
+    def test_mcp_projection_preserves_durable_and_acp_receipts_across_reload(self):
+        import sqlite3
+        from contextlib import closing
+        facts={'receipt':'fixture-receipt','submitted':True,'recipient_delivery_verified':False,'unknown':None}
+        original={'content':[{'type':'text','text':json.dumps(facts,separators=(',',':'))},
+                             {'type':'text','text':'Independent caveat'}],'structuredContent':facts,'isError':False}
+        self.server.mcp_result=original
+        try:
+            c=self.client();s=self.new(c,[{'type':'http','name':'fixture','url':f'http://127.0.0.1:{self.server.server_port}/mcp','headers':[]}])
+            self.assertEqual(self.prompt(c,s,'use mcp',approve=True)['result']['stopReason'],'end_turn')
+            wire=json.loads(next(i['output'] for i in REQUESTS[-1]['input'] if i.get('type')=='function_call_output'))
+            self.assertEqual(wire['content'],[original['content'][1]])
+            self.assertEqual(wire['structuredContent'],facts)
+            receipts=[u['params']['update'] for u in c.updates if u['params']['update'].get('sessionUpdate')=='tool_call_update' and u['params']['update'].get('status')=='completed']
+            self.assertEqual(json.loads(receipts[-1]['content'][0]['content']['text']),original)
+            with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:
+                saved=json.loads(db.execute('SELECT items FROM sessions WHERE id=?',(s,)).fetchone()[0])
+            saved_output=next(i['output'] for i in saved if i.get('type')=='function_call_output')
+            self.assertEqual(json.loads(saved_output),original)
+            c.close();self.clients.remove(c);c=self.client()
+            self.assertIn('result',c.call('session/load',{'sessionId':s,'cwd':str(self.work),'mcpServers':[]}))
+            self.assertEqual(self.prompt(c,s,'Recall the established receipt')['result']['stopReason'],'end_turn')
+            wire=json.loads(next(i['output'] for i in REQUESTS[-1]['input'] if i.get('type')=='function_call_output'))
+            self.assertEqual(wire['content'],[original['content'][1]])
+            self.assertFalse(c.callbacks,'Reload must not replay the MCP call')
+            with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:
+                restored=json.loads(db.execute('SELECT items FROM sessions WHERE id=?',(s,)).fetchone()[0])
+            self.assertEqual(next(i['output'] for i in restored if i.get('type')=='function_call_output'),saved_output)
+        finally:self.server.mcp_result=None
     def test_cancel_returns_without_waiting_for_model_and_allows_next_turn(self):
         c=self.client();s=self.new(c);id=c.request('session/prompt',{'sessionId':s,'prompt':[{'type':'text','text':'slow'}]});time.sleep(.2);start=time.time();c.send({'jsonrpc':'2.0','method':'session/cancel','params':{'sessionId':s}});self.assertEqual(c.finish(id)['result']['stopReason'],'cancelled');self.assertLess(time.time()-start,1);self.assertEqual(self.prompt(c,s,'next')['result']['stopReason'],'end_turn')
     def test_unknown_methods_and_outside_workspaces_fail(self):

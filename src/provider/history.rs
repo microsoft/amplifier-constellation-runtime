@@ -199,6 +199,11 @@ pub fn responses(items: &[Value]) -> Vec<Value> {
 /// their pictures. The pictures are explicitly attributed tool evidence, not
 /// a new human request. This uses the existing image codec for each provider.
 fn with_tool_images(items: &[Value]) -> Vec<Value> {
+    // Restored native windows and incremental continuations may bypass the
+    // extractive context view. Apply the same lossless client-tool projection
+    // here, without touching native provider state or the persisted transcript.
+    let projected = crate::mcp::model_view(items);
+    let items = projected.as_slice();
     let mut out = vec![];
     let mut pictures = vec![];
     for (index, item) in items.iter().enumerate() {
@@ -233,6 +238,46 @@ mod image_tests {
     use base64::{Engine, engine::general_purpose::STANDARD};
     fn png() -> Vec<u8> {
         STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jC2cAAAAASUVORK5CYII=").unwrap()
+    }
+    #[test]
+    fn restored_mcp_results_reach_every_provider_once_without_changing_saved_items() {
+        let facts = json!({"submitted":true,"recipient_delivery_verified":false,"unknown":null});
+        let envelope = json!({"content":[{"type":"text","text":facts.to_string()},
+            {"type":"text","text":"Additional caveat"}],"structuredContent":facts,"isError":true});
+        let items = vec![
+            json!({"type":"function_call","call_id":"one","name":"mcp_0_context_read","arguments":"{}","_provider_shadow":true}),
+            json!({"type":"function_call_output","call_id":"one","output":envelope.to_string()}),
+        ];
+        let saved = serde_json::to_vec(&items).unwrap();
+        let check = |result: &Value| {
+            assert_eq!(result["structuredContent"], facts);
+            assert_eq!(
+                result["content"],
+                json!([{"type":"text","text":"Additional caveat"}])
+            );
+            assert_eq!(result["isError"], true);
+        };
+        let responses = super::responses(&items);
+        check(&serde_json::from_str::<Value>(responses[1]["output"].as_str().unwrap()).unwrap());
+        for kind in [
+            ProviderKind::Anthropic,
+            ProviderKind::Gemini,
+            ProviderKind::ChatCompletions,
+            ProviderKind::Ollama,
+        ] {
+            let wire = super::messages(kind, &items).unwrap();
+            if kind == ProviderKind::Gemini {
+                check(&wire[0]["parts"][0]["functionResponse"]["response"]["result"]);
+            } else {
+                let raw = if kind == ProviderKind::Anthropic {
+                    &wire[0]["content"][0]["content"]
+                } else {
+                    &wire[0]["content"]
+                };
+                check(&serde_json::from_str::<Value>(raw.as_str().unwrap()).unwrap());
+            }
+        }
+        assert_eq!(serde_json::to_vec(&items).unwrap(), saved);
     }
     #[test]
     fn images_follow_the_entire_tool_batch_and_reach_each_provider() {
