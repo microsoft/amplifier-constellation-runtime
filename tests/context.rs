@@ -15,7 +15,7 @@ fn large_archives_compact_without_discarding_original_messages() {
     ];
     assert!(!agent_runtime::media::request_fits(&items).unwrap());
     let original_len = items[0]["content"].as_str().unwrap().len();
-    let view = prepare(&items, &Policy::default(), 16000).unwrap();
+    let view = prepare(&items, &Policy::default(), 16000, 2).unwrap();
     assert!(agent_runtime::media::request_fits(&view.items).unwrap());
     assert_eq!(view.items.last(), items.last());
     assert_eq!(items[0]["content"].as_str().unwrap().len(), original_len);
@@ -27,7 +27,8 @@ fn large_archives_compact_without_discarding_original_messages() {
                 auto_compact: false,
                 ..Policy::default()
             },
-            16000
+            16000,
+            2
         )
         .is_err()
     );
@@ -38,9 +39,9 @@ fn small_media_estimate_does_not_bypass_serialized_request_limit() {
     let image = json!({"type":"input_image","image_url":format!("data:image/png;base64,{}", "A".repeat(49 * 1024 * 1024))});
     let current = json!({"role":"user","content":[image]});
     assert!(agent_runtime::media::context_bytes(std::slice::from_ref(&current)).unwrap() < 16000);
-    assert!(prepare(std::slice::from_ref(&current), &Policy::default(), 16000).is_err());
+    assert!(prepare(std::slice::from_ref(&current), &Policy::default(), 16000, 0).is_err());
     let items = vec![current, json!({"role":"user","content":"New task"})];
-    let view = prepare(&items, &Policy::default(), 16000).unwrap();
+    let view = prepare(&items, &Policy::default(), 16000, 1).unwrap();
     assert!(agent_runtime::media::request_fits(&view.items).unwrap());
 }
 
@@ -59,7 +60,7 @@ fn compaction_preserves_native_tool_pairs_and_complete_original_history() {
     items.push(json!({"type":"function_call","call_id":"c1","name":"clock","arguments":"{}","_provider_shadow":true}));
     items.push(json!({"type":"function_call_output","call_id":"c1","output":"actual observation"}));
     let original = items.clone();
-    let view = prepare(&items, &Policy::default(), 7000).unwrap();
+    let view = prepare(&items, &Policy::default(), 7000, 16).unwrap();
     assert_eq!(items, original);
     assert!(view.items.contains(&native));
     assert!(
@@ -107,7 +108,7 @@ fn active_turn_is_never_pruned_and_archives_are_retrievable_in_utf8_chunks() {
         json!({"role":"user","content":"old task"}),
         json!({"role":"user","content":large}),
     ];
-    assert!(prepare(&items, &Policy::default(), 4096).is_err());
+    assert!(prepare(&items, &Policy::default(), 4096, 1).is_err());
     let first = history(&items, &json!({"start_item":1,"limit":1})).unwrap();
     let next = first["items"][0]["next_text_offset"].as_u64().unwrap();
     let second = history(
@@ -117,6 +118,59 @@ fn active_turn_is_never_pruned_and_archives_are_retrievable_in_utf8_chunks() {
     .unwrap();
     assert_eq!(second["items"][0]["text_offset"], next);
     assert_eq!(first["items"][0]["text"].as_str().unwrap().len(), 4096);
+}
+
+#[test]
+fn active_awareness_does_not_make_fresh_tool_evidence_archivable() {
+    let mut items = vec![
+        json!({"role":"user","content":"Old completed context ".repeat(2000)}),
+        json!({"role":"assistant","content":"Old work finished."}),
+        json!({"role":"user","content":"Inspect the requested cells and report actual properties."}),
+        json!({"type":"function_call","call_id":"inspect-current","name":"inspect","arguments":"{\"x\":-511,\"y\":65,\"z\":-566}"}),
+        json!({"type":"function_call_output","call_id":"inspect-current","output":"{\"position\":{\"x\":-511,\"y\":65,\"z\":-566},\"name\":\"cobblestone\",\"properties\":{}}"}),
+    ];
+    for i in 0..3 {
+        items.push(json!({"role":"user","content":format!("Awareness update {i}; same active prompt, no new assignment.")}));
+    }
+    let original = items.clone();
+    let policy = Policy {
+        retain_recent_turns: 1,
+        ..Policy::default()
+    };
+    let view = prepare(&items, &policy, 6000, 2).unwrap();
+    assert_eq!(
+        items, original,
+        "Compaction never changes canonical history"
+    );
+    for item in &original[2..] {
+        assert!(
+            view.items.contains(item),
+            "Active prompt and observations must stay in the model view: {item}"
+        );
+    }
+    assert!(view.checkpoint.unwrap()["prefix_items"].as_u64().unwrap() <= 2);
+
+    // Once that turn ends, the next controlling prompt may archive it normally.
+    items.push(json!({"role":"assistant","content":"Inspection finished."}));
+    items.push(json!({"role":"user","content":"An independent next request."}));
+    let next = prepare(&items, &policy, 6000, items.len() - 1).unwrap();
+    assert!(next.checkpoint.unwrap()["prefix_items"].as_u64().unwrap() > 2);
+    assert_eq!(next.items.last(), items.last());
+}
+
+#[test]
+fn awareness_cannot_hide_an_oversized_active_tool_result() {
+    let items = vec![
+        json!({"role":"user","content":"Old completed request"}),
+        json!({"role":"assistant","content":"Done."}),
+        json!({"role":"user","content":"Current inspection"}),
+        json!({"type":"function_call","call_id":"current","name":"inspect","arguments":"{}"}),
+        json!({"type":"function_call_output","call_id":"current","output":"Current observation ".repeat(1000)}),
+        json!({"role":"user","content":"An update during the same turn"}),
+    ];
+    let original = items.clone();
+    assert!(prepare(&items, &Policy::default(), 4096, 2).is_err());
+    assert_eq!(items, original);
 }
 
 #[test]

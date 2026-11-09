@@ -4,6 +4,67 @@ import json, socket, sqlite3, threading, unittest
 import providers
 
 class Tests(providers.Tests):
+    def test_compaction_keeps_active_observations_after_awareness(self):
+        started=threading.Event();release=threading.Event()
+        self.setup_kind('chat-completions')
+        p=self.home/'runtime.json';cfg=json.loads(p.read_text())
+        cfg['limits']['max_context_bytes']=24000
+        cfg['context'].update(retain_recent_turns=1,provider_compaction=False)
+        p.write_text(json.dumps(cfg))
+        observation='ACTUAL_OBSERVATION: cobblestone, not air; facing east, not west.'
+        (self.work/'observation.txt').write_text(observation)
+        original_handler=providers.Handler.do_POST
+        def model(handler):
+            body=json.loads(handler.rfile.read(int(handler.headers['Content-Length'])))
+            requests=handler.server.case['requests']
+            requests.append((dict(handler.headers),body,handler.path))
+            index=3 if handler.server.case.get('initializing') else len(requests)
+            if index==1:
+                started.set();release.wait(10)
+            if index<=2:
+                name,args=('workspace_read',{'path':'observation.txt'}) if index==1 else ('clock',{})
+                delta={'tool_calls':[{'index':0,'id':f'active-{index}','type':'function','function':{'name':name,'arguments':json.dumps(args)}}]}
+                reason='tool_calls'
+            else:
+                delta={'content':'Recorded the observations.'};reason='stop'
+            handler.send_response(200);handler.send_header('Content-Type','text/event-stream');handler.end_headers()
+            handler.wfile.write(('data: '+json.dumps({'choices':[{'delta':delta,'finish_reason':reason}]})+'\n\ndata: [DONE]\n\n').encode());handler.wfile.flush()
+        providers.Handler.do_POST=model
+        try:
+            c=self.client();sid=c.call('session/new',{'cwd':str(self.work),'mcpServers':[]})['result']['sessionId']
+            # Bind the selected provider normally before loading an older
+            # completed transcript into this disposable session.
+            self.server.case['initializing']=True
+            self.assertEqual(self.prompt(c,sid,'Initialize fixture provider')['result']['stopReason'],'end_turn')
+            self.server.case['initializing']=False
+            self.server.case['requests'].clear()
+            old=[{'role':'user','content':'Archived completed work. '*2000},{'role':'assistant','content':'Completed.'}]
+            with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:
+                db.execute('UPDATE sessions SET items=? WHERE id=?',(json.dumps(old),sid));db.commit()
+            pid=c.request('session/prompt',{'sessionId':sid,'prompt':[{'type':'text','text':'Inspect observation.txt, check the clock, then report the actual evidence.'}]})
+            if not started.wait(5):
+                self.fail(f"Model fixture was not reached: {c.finish(pid,approve=True)}")
+            for i in range(3):
+                r=c.call('_session/steering',{'sessionId':sid,'prompt':[{'type':'text','text':f'Awareness {i}: keep the same inspection.'}],'_meta':{'steering':{'inputId':f'awareness-{i}','idleBehavior':'promptRequired'}}})
+                self.assertEqual(r['result']['outcome'],'injected')
+            release.set();self.assertEqual(c.finish(pid,approve=True)['result']['stopReason'],'end_turn')
+            requests=self.server.case['requests'];self.assertEqual(len(requests),3)
+            for _,body,_ in requests[1:]:
+                messages=body['messages']
+                self.assertTrue(any(m.get('role')=='tool' and observation in m.get('content','') for m in messages),'Fresh observation disappeared from the actual provider request')
+                self.assertTrue(any(call['id']=='active-1' for m in messages for call in m.get('tool_calls',[])))
+            with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:
+                saved=json.loads(db.execute('SELECT items FROM sessions WHERE id=?',(sid,)).fetchone()[0])
+                self.assertEqual(saved[:len(old)],old)
+                self.assertEqual(db.execute('SELECT count(*) FROM turns WHERE session=?',(sid,)).fetchone()[0],2)
+                self.assertEqual(db.execute("SELECT state,recorded FROM turn_inputs ORDER BY sequence").fetchall(),[('incorporated',1)]*3)
+                checkpoints=[json.loads(r[0]) for r in db.execute('SELECT data FROM context_checkpoints')]
+                self.assertTrue(checkpoints)
+                self.assertTrue(all(x['prefix_items']<=len(old) for x in checkpoints))
+            self.assertEqual(sum(v.get('type')=='function_call' and v.get('name')=='workspace_read' for v in saved),1)
+        finally:
+            release.set();providers.Handler.do_POST=original_handler
+
     def test_context_rejection_never_claims_model_incorporation(self):
         started=threading.Event();release=threading.Event();self.setup_kind('anthropic',stall=True,started=started,release=release)
         p=self.home/'runtime.json';cfg=json.loads(p.read_text());cfg['limits']['max_context_bytes']=24000;cfg['context']['auto_compact']=False;p.write_text(json.dumps(cfg))
@@ -89,4 +150,4 @@ class Tests(providers.Tests):
 
 # The parent class is a fixture utility here; run only the new contract test.
 if __name__=='__main__':
-    unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite([Tests('test_ordered_input_preserves_original_call_and_tool_effect'),Tests('test_context_rejection_never_claims_model_incorporation'),Tests('test_unknown_input_acknowledgment_does_not_replay_candidate')])).wasSuccessful() or exit(1)
+    unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite([Tests('test_compaction_keeps_active_observations_after_awareness'),Tests('test_ordered_input_preserves_original_call_and_tool_effect'),Tests('test_context_rejection_never_claims_model_incorporation'),Tests('test_unknown_input_acknowledgment_does_not_replay_candidate')])).wasSuccessful() or exit(1)

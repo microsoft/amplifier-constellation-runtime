@@ -72,6 +72,7 @@ impl Turn<'_> {
                 .take(80)
                 .collect();
         }
+        let active_turn_start = self.session.items.len();
         self.session
             .items
             .push(json!({"role":"user","content":content,"_acp_prompt":prompt}));
@@ -98,7 +99,7 @@ impl Turn<'_> {
             biased;
             _=token.cancelled()=>Ok("cancelled"),
             _=deadline=>{token.cancel();Ok("turn_deadline")},
-            r=self.execute(&turn)=>r,
+            r=self.execute(&turn, active_turn_start)=>r,
         };
         for report in self.mcp.cancel_pending().await {
             self.store.event(
@@ -135,7 +136,7 @@ impl Turn<'_> {
             json!({"stopReason":match result? {"turn_deadline"|"tool_call_budget"=>"max_turn_requests",other=>other},"_meta":{"io.github.bkrabach.agent-runtime":{"turnId":turn,"state":state,"stopCause":reason,"elapsedMs":started.elapsed().as_millis(),"inputReceipts":self.inbox.summary()?}}}),
         )
     }
-    async fn execute(&mut self, turn: &str) -> Result<&'static str> {
+    async fn execute(&mut self, turn: &str, active_turn_start: usize) -> Result<&'static str> {
         let mut provider = Provider::new(self.config)?;
         if !self.mcp.unavailable.is_empty() {
             self.store.event(
@@ -238,7 +239,7 @@ impl Turn<'_> {
                     &self.session.items,
                     &instructions,
                     &definitions,
-                    (self.store, &self.session.id, turn),
+                    (self.store, &self.session.id, turn, active_turn_start),
                     self.peer,
                     &self.cancel,
                 )

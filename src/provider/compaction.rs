@@ -116,11 +116,11 @@ impl Provider {
         original: &[Value],
         instructions: &str,
         tools: &[Value],
-        scope: (&Store, &str, &str),
+        scope: (&Store, &str, &str, usize),
         peer: &Peer,
         cancel: &CancellationToken,
     ) -> Result<View> {
-        let (store, sid, turn) = scope;
+        let (store, sid, turn, active_turn_start) = scope;
         let fixed = instructions.len() + serde_json::to_vec(tools)?.len();
         let budget = self
             .config
@@ -129,7 +129,12 @@ impl Provider {
             .checked_sub(fixed)
             .context("Instructions and tools exceed context budget")?;
         if !self.native_context() {
-            return crate::context::prepare(original, &self.config.context, budget);
+            return crate::context::prepare(
+                original,
+                &self.config.context,
+                budget,
+                active_turn_start,
+            );
         }
         let settings = digest(&json!({"instructions":instructions,"tools":tools}))?;
         let provider = self.config.provider.fingerprint();
@@ -145,7 +150,8 @@ impl Provider {
         // or prune a canonical native window through the extractive fallback.
         let mut checkpoint = None;
         if !native_window {
-            let view = crate::context::prepare(original, &self.config.context, budget)?;
+            let view =
+                crate::context::prepare(original, &self.config.context, budget, active_turn_start)?;
             items = view.items;
             checkpoint = view.checkpoint;
         }
