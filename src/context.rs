@@ -198,7 +198,18 @@ fn note(items: &[Value], end: usize, bytes: usize, digest: &str) -> String {
     format!("{header}{}", rows.concat())
 }
 
-pub fn prepare(items: &[Value], policy: &Policy, budget: usize) -> Result<View> {
+pub fn prepare(
+    items: &[Value],
+    policy: &Policy,
+    budget: usize,
+    active_turn_start: usize,
+) -> Result<View> {
+    ensure!(
+        items
+            .get(active_turn_start)
+            .is_some_and(|v| v["role"] == "user"),
+        "Invalid active prompt boundary"
+    );
     let original = items;
     let projected = refreshed_view(original);
     let items = projected.as_slice();
@@ -216,7 +227,9 @@ pub fn prepare(items: &[Value], policy: &Policy, budget: usize) -> Result<View> 
     let starts: Vec<_> = items
         .iter()
         .enumerate()
-        .filter(|(_, v)| v["role"] == "user")
+        // Steering is also a user message, but does not end the controlling
+        // prompt. Keep its observations and tool continuation together.
+        .filter(|(i, v)| *i <= active_turn_start && v["role"] == "user")
         .map(|(i, _)| i)
         .collect();
     ensure!(

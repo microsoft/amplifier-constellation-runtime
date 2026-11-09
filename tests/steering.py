@@ -276,7 +276,12 @@ class Tests(unittest.TestCase):
         self.test_refreshed_context_during_pending_steering_keeps_tool_result_chain()
         with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:
             checkpoints=[json.loads(row[0]) for row in db.execute("SELECT data FROM events WHERE kind='context.compacted'")]
-        self.assertGreaterEqual(len({v['prefix_items'] for v in checkpoints}),2)
+            saved=json.loads(db.execute('SELECT items FROM sessions WHERE id=?',(self.sid,)).fetchone()[0])
+        self.assertTrue(checkpoints)
+        # Awareness can refresh the view without making this prompt's tool
+        # continuation eligible for extraction.
+        self.assertTrue(all(v['prefix_items']<=len(items) for v in checkpoints))
+        self.assertEqual(saved[:len(items)],items)
     def test_input_during_explicit_create_waits_for_new_response_identity(self):
         pid=self.start()
         call={'type':'function_call','call_id':'write-once','name':'workspace_write','arguments':json.dumps({'path':'proof.txt','content':'one effect'})}

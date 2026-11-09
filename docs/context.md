@@ -10,6 +10,13 @@ No transcript is copied into the instance database. Replacing the native store c
 
 ## Working context and compaction
 
+Extractive compaction keeps the current controlling prompt and its complete
+tool continuation together. Conversation updates received during that prompt
+are additional input, not completed-turn boundaries. Older history can still
+be compacted, and the original transcript remains available through
+`session_history`. If the active continuation itself cannot fit, the runtime
+reports the capacity failure instead of silently removing its observations.
+
 The saved transcript stays intact. Model requests use a separate working window.
 When an older session has no valid native checkpoint, the runtime first applies
 the existing bounded archive projection and producer-declared snapshot refreshes.
