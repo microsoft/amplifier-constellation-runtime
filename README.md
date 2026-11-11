@@ -1,13 +1,23 @@
-# Agent Runtime
+# Constellation Runtime
 
-Part of [Amplifier Constellation](https://github.com/microsoft/amplifier-constellation).
+A reusable reasoning and execution engine for persistent agents. This standalone
+Rust implementation runs its own model/tool loop, preserves execution sessions,
+and connects through Agent Client Protocol (ACP). It calls configured model
+providers directly; another agent framework is not required.
 
-A standalone Rust agent with its own model/tool loop, durable sessions, and an ACP interface. It calls OpenAI, Azure OpenAI, Anthropic, Gemini, Ollama, vLLM, and compatible model servers directly. It does not launch Codex or share another agent's history.
+Runtime contributes to the [Constellation vision](https://github.com/microsoft/amplifier-constellation/blob/main/docs/VISION.md).
+The umbrella owns [shared service responsibilities and interfaces](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/family.v1-candidate.md).
+This repository owns the native engine's implementation and detailed contracts.
 
-Each installation has a private home, explicit workspace, model credential reference, and execution limits. Connect an ACP client directly over stdio, or use the independent [Agent Instance](https://github.com/microsoft/amplifier-constellation-instance) service for remote access, management, profiles, conversation sources, and durable background responsibilities. Experiences and adapters remain separate projects.
+## Find the right starting point
 
-Start with [How the runtime works](docs/runtime-overview.md) for a visual overview
-of the current design and the responsibilities of Runtime, Instance and adapters.
+| Read | For |
+| --- | --- |
+| [Runtime vision](docs/VISION.md) | Intended value and the contribution this engine makes. |
+| [Contract map](contracts/README.md) | The local interface or behavior your change must preserve. |
+| [How the runtime works](docs/runtime-overview.md) | An illustrative walk through the model/tool loop and saved state. |
+| [Provider setup](docs/providers.md) and [configuration](docs/configuration.md) | Connect a model, inspect configuration and make a supported change. |
+| [Validation](docs/validation.md) | Check the relevant source, protocol, provider and platform behavior. |
 
 ## Start one agent
 
@@ -19,98 +29,68 @@ cargo build --release --locked
   --workspace "$PWD/workspace" --name "My agent" --model gpt-6.1-sol
 ```
 
-Supply `OPENAI_API_KEY` privately in the process environment. The configuration stores the variable's name, never its value. The model must be available to that account. Then configure an ACP client to run:
+Supply `OPENAI_API_KEY` privately in the process environment. Configuration stores
+its variable name, never the value. The model must be available to that account.
+Configure an ACP client to run:
 
 ```sh
 /absolute/path/to/agent-runtime --home /absolute/path/to/instance acp
 ```
 
-Use the configured workspace as the client's session working folder. On Windows, the binary is `agent-runtime.exe`. Configuration is in `instance/runtime.json`; `check`, `sessions`, and `events SESSION_ID` are available alongside `acp`. The home must not be inside the exposed workspace.
+Use the configured workspace as the client's session working folder. On Windows,
+the executable is `agent-runtime.exe`. The private runtime home must not be inside
+the exposed workspace. `check`, `sessions` and `events SESSION_ID` support local
+inspection; configuration is in `runtime.json` under the home.
 
-### Choose a provider
+`agent-runtime providers` lists provider presets. `init` and
+`configure-provider` use the same provider options; see [provider setup](docs/providers.md)
+for endpoint, account and local-server behavior. Per-session model and reasoning
+choices use the [ACP capability contract](docs/acp-optional-capabilities.md#session-model-and-reasoning-choices).
+A supported same-route choice is different from changing provider/account
+boundaries; existing private histories are not silently translated.
 
-`agent-runtime providers` lists the ten supported presets. `init` and `configure-provider` accept the same provider options:
+## Compose the capabilities you need
 
-```sh
-agent-runtime --home /absolute/path/to/instance configure-provider \
-  --provider anthropic --model claude-sonnet-5-5 --reasoning-effort medium
-```
+Clients can use the runtime directly over stdio. The independent
+[Instance](https://github.com/microsoft/amplifier-constellation-instance) service
+can supply installed identity, authenticated remote access and management.
+[Platform setup](docs/platforms.md) covers the optional managed installation.
+Experiences and domain connectors stay independently owned.
 
-Supply `ANTHROPIC_API_KEY` privately, then reconnect and create a new session. Existing histories remain available for inspection; continuing them requires their original provider, endpoint, and model. Changing an environment variable's credential does not invalidate a session. [Provider setup and compatibility](docs/providers.md) covers all presets, endpoints, authentication, local servers, and the Amplifier module inventory.
+| Local capability | Interface and configuration home |
+| --- | --- |
+| Sessions, content, model/reasoning choices and permission modes | [ACP capabilities](docs/acp-optional-capabilities.md) |
+| Workspace tools, MCP access and execution boundaries | [Architecture](docs/architecture.md#model-and-tools) |
+| Model/provider integration and account routes | [Providers](docs/providers.md), [ChatGPT](docs/chatgpt.md), [Copilot](docs/copilot.md) |
+| Optional media, hosted tools and structured output | [Native capabilities](docs/native-capabilities.md) |
+| Model working context, original history and read-only retrieval | [Context](docs/context.md) |
+| New input during work, receipts and recovery | [Steering](docs/steering-design.md) |
+| Installation configuration and revision-checked changes | [Configuration](docs/configuration.md) |
+| Optional decision, assessment, watch and continuation helpers | [Decisions](docs/decisions.md), [assessment](docs/assessment.md), [watches](docs/watches.md), [continuation](docs/continuation.md) |
 
-### Optional managed installation on Linux, macOS, or Windows
+Inspect the selected implementation and configuration before relying on a
+capability. MCP program startup, workspace commands and external actions have
+different trust boundaries; the [architecture](docs/architecture.md) and
+[platform documentation](docs/platforms.md) define them. A compatible transport
+alone establishes neither provider quality nor permission to act.
 
-With both repositories checked out, an Agent Instance binary built, and the model key in the environment:
+## Develop and verify
 
-```sh
-python3 scripts/install-instance.py \
-  --host-repo /absolute/path/to/agent-instance \
-  --host-binary /absolute/path/to/agent-instance/target/release/agent-instance \
-  --runtime-binary /absolute/path/to/agent-runtime/target/release/agent-runtime \
-  --home "$HOME/.local/share/agent-instance/my-native-agent" \
-  --name "My native agent"
-```
-
-On Windows use `python` and `.exe` binary paths. The installer uses systemd, LaunchAgent, or a user scheduled task according to the platform; [platform setup and limits](docs/platforms.md) describes the prerequisites.
-
-This creates a new installation, copies the engine, stores a private credential reference, and starts an independent user service. It refuses an existing installation. Existing agents and Codex histories are not converted. The host's normal certificate, authentication, and remote-access setup applies. The installer also accepts `--provider`, `--model`, `--endpoint`, `--key-env`, and the runtime's reasoning/authentication options. Keyless local models and mock installations need no credential. Inspect its `--help` for URL and mode settings.
-
-### Configure through a UI or automation
-
-`config-schema`, `config-inspect`, `config-validate`, and revision-checked `configure` expose the same complete configuration to the CLI, Agent Instance, and an external management UI. [Configuration contract](docs/configuration.md) covers updates, backups, and restart behavior.
-
-Owners using a dedicated installation container can enable [container-local administrator commands](docs/container-commands.md) for package installation while keeping host access outside that container.
-
-[GitHub Copilot](docs/copilot.md) uses the pinned official SDK for model inference while this Rust runtime retains tool execution, permissions, and saved history.
-
-[Continue with ChatGPT](docs/chatgpt.md) supports a separate subscription authorization and account model catalog, with explicit user consent. It never imports Codex credentials.
-
-## Optional native capabilities
-
-Enable [image generation, media input/output, hosted tools, and structured output](docs/native-capabilities.md) with `configure-capabilities`. Configure [JEV, Microsoft Decision One, OpenAI Decisions, H2O Lightning, and local decision services](docs/decisions.md) independently with `configure-decision`. Both remain opt-in and expose their configuration through `capabilities`.
-
-## What works
-
-- ACP v1 initialization, new/load/list/resume/close/delete sessions, prompt streaming, cancellation, mode/config-option changes, tool events, and permission requests.
-- Resource links and embedded resources in prompts, with original blocks preserved for replay. References do not automatically fetch URLs or open files; supplied binary resources are retained but not claimed to be decoded by a text model.
-- SQLite history with process-safe session ownership; reconnecting clients replay conversation and tool history.
-- Native model/tool iteration with bounded time, calls, output, context, and concurrency.
-- Provider-native [context compaction](docs/context.md), stable cache prefixes, provenance checkpoints, and read-only original-message retrieval; full history remains saved. Other providers retain an extractive fallback.
-- Workspace file tools on Linux, macOS, and Windows. Linux offers bounded commands through bubblewrap; macOS uses a default-deny Seatbelt profile; Windows uses an AppContainer without network capabilities and a Job Object for its process tree. None pass provider credentials or the host home to commands.
-- MCP tools over Streamable HTTP, with optional trusted-client stdio support. Per-connection credentials are reattached on resume and are never saved in session history.
-- Three session modes: read-only, ask before changes, and workspace access. External mutations still require approval unless explicitly listed in configuration.
-- Durable tool intent before execution. Interrupted effects are reported as uncertain and are never automatically retried.
-
-## Deliberate limits
-
-Version 0.4 adds configuration discovery/editing, archive-based context compaction, explicit ChatGPT subscription sign-in, native-platform installation, and confined macOS commands. API/provider capabilities remain opt-in and account/model dependent. ChatGPT's actual consent and entitlement must be verified with a newly authorized account. Version 0.5 adds the official Copilot SDK bridge on Linux and macOS. It currently buffers each model step and has no provider-native media/tool support. Embeddings remain unfinished. OpenAI caching is automatic; Anthropic caching and capability-checked native compaction are configurable. There is no built-in multi-agent delegation or mobile UI; connect additional capabilities through explicit MCP servers and separate experiences. The engine does not expose client filesystem/terminal callbacks; file tools belong to this agent's workspace.
-
-Version 0.6 adds native Windows commands with verified file, network, environment, cancellation, and permission-cleanup boundaries. Windows commands require a local workspace without reparse points or multiply linked files; executables must be in that workspace or the Windows system directory. See [platform scope](docs/platforms.md) for limits. No platform falls back to unrestricted execution. macOS depends on the deprecated but currently available `sandbox-exec` helper and intentionally denies additional host tools that need broader access.
-
-An ACP connection owns active foreground execution. Disconnecting cancels it. The separate Agent Instance scheduler can own explicitly authorized background work across browser disconnection. Scheduler reports still require independent verification; producing a report is not proof that a responsibility is complete.
-
-Client-supplied local MCP programs are disabled by default. For a trusted local ACP host, launch `agent-runtime --home /absolute/instance acp --trusted-local-client`. This enables standard stdio MCP for that process without changing saved settings. Setting `allow_client_stdio_mcp: true` enables it persistently. Either choice gives that ACP client authority to start host programs, beyond workspace tools and session modes. Normal remote installations keep this restricted. Because v1 mandates stdio MCP, the restricted default is a policy-limited profile, not a claim of full v1 conformance. The trusted-local profile is covered by the upstream TCK; see [validation](docs/validation.md).
-
-The optional [native history query contract](docs/context.md#native-history-source) lets an authorized instance context layer retrieve this engine's own public conversations without exporting and reimporting transcripts. It does not expose a new public network endpoint or change ordinary ACP interoperability.
-
-The runtime does not infer permission from a persona. MCP annotations alone do not grant permission: `trusted_mcp_readonly_urls` names exact HTTP endpoints whose read-only declarations are trusted. Other MCP calls require approval, and read-only mode denies them. Optional `allowed_mcp_mutations` entries use the exact HTTP endpoint plus `#tool_name`, never a client-selected server label. Source access is enforced by each provider's credential and audience policy. A cancelled remote mutation may still finish remotely; inspect its outcome before retrying.
-
-## Check it
+Use the [Constellation working agreement](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/family.v1-candidate.md#developing-the-family)
+and read only the local contracts affected by the outcome. Explore engine
+improvements independently within those promises; settle a changed producer or
+consumer expectation with its owner before dependent work relies on it.
 
 ```sh
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
+cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
-cargo build --locked
-python3 tests/protocol.py
-python3 tests/providers.py
-python3 tests/capabilities.py
-python3 tests/install.py
-python3 tests/management.py
-python3 tests/copilot_protocol.py
 ```
 
-The Python tests use local model/MCP fixtures and real ACP subprocesses; no paid account is needed. `tests/official-sdk.mjs` checks an existing, exercised session with the official ACP client SDK. See [architecture](docs/architecture.md) and [validation](docs/validation.md) for scope and results.
+The [validation guide](docs/validation.md) covers additional real ACP subprocess,
+local provider/MCP fixture and platform checks. Source fixtures do not establish
+live provider quality. A turn ending, a tool result and the user's desired outcome
+remain separate observations.
 
 ## Contributing
 
@@ -136,47 +116,3 @@ trademarks or logos is subject to and must follow
 [Microsoft's Trademark & Brand Guidelines](https://www.microsoft.com/legal/intellectualproperty/trademarks/usage/general).
 Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion or imply Microsoft sponsorship.
 Any use of third-party trademarks or logos are subject to those third-party's policies.
-
-See [bounded continuation advice](docs/continuation.md) for receipt-based recovery and remaining-budget checks, and [attention watches](docs/watches.md) for current-state and exact-predicate contracts. Both are optional host helpers; standard ACP agents remain independent.
-
-Runtime 0.14 adds static `helper-capabilities` discovery and explicit task limits
-through `watch-v2` and `continuation-v2`. A finite limit and deliberately no
-configured limit are distinct; missing/unknown values are rejected. The original
-numeric helper commands and persisted watches remain compatible. This does not
-change existing task authority or the connected agent's model/runtime family.
-
-### Inspecting and sharing local images
-
-`workspace_view_image` reads a PNG/JPEG/GIF/WebP inside the session's granted
-workspace and gives the model visual evidence. `workspace_attach_image` explicitly
-attaches that saved image to the current ACP conversation (maximum 2 MiB). From
-0.15.2, this explicit attachment is response output in every session mode,
-including read-only and ask, and needs no separate write approval. It reads an
-already permitted file without changing it. Workspace roots, image validation
-and the size limit still apply; viewing an image does not publish it. File
-writes, commands and external tool effects retain their existing permissions.
-The ACP client decides how attachments are displayed or delivered, such as a
-Slack file upload. The runtime does not choose another destination or fetch a
-remote URL when attaching.
-
-Standard MCP image results are retained as attributed visual tool evidence and
-replayed in tool cards. Images are passed through the existing provider image
-codecs, without embedding base64 in truncated text. Tool observations never
-become outgoing attachments automatically; tool-provided private runtime fields
-cannot request publication. Reloading a session shows saved tool images without
-rerunning a capture or uploading an attachment again.
-
-Optional MCP integrations can set
-`_meta["io.github.bkrabach.agent-runtime"].optional: true` on their ACP MCP
-descriptor. Failed optional discovery is bounded to five seconds and leaves other
-connections usable, with a redacted degraded-connection report in the agent's
-instructions, `runtime_capabilities`, and turn observations. Server aliases retain
-the original descriptor index. Required connections remain required. Reload a
-session to retry discovery; uncertain tool actions are never automatically replayed.
-This is an optional namespaced extension, not a requirement of standard ACP.
-
-### Completed public commentary
-
-Clients may opt in to `com.microsoft.amplifier.message.completion` version 1 through ACP capability metadata. For OpenAI Responses streams, a completed assistant output item now emits a bounded text-completion receipt. This lets a conversation adapter post a whole public contribution while later work continues. Private reasoning is never included. The receipt is emitted only when the provider’s completed snapshot matches the streamed text; it does not claim task completion.
-
-Ordinary ACP clients continue to receive the same text chunks and final prompt result. Other providers retain their existing output behavior; adapters must not infer completion from pauses or partial text. See the [conversation delivery contract](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/conversation-delivery.v1-candidate.md).

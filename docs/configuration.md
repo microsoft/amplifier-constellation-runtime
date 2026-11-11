@@ -16,7 +16,13 @@ agent-runtime --home /absolute/engine configure /absolute/candidate.json \
 
 `configure` requires the revision from inspection. A concurrent edit is rejected without overwriting it. The previous file is preserved under `configuration-backups/`; the response includes its path. Updates are private atomic replacements under a process lock. `configure-provider`, `configure-capabilities`, and `configure-decision` use the same mechanism.
 
-Changes apply to **new ACP processes**, not already executing turns. Stop or finish existing work before reconnecting. A changed model/provider/endpoint/account requires a new engine session; historical sessions remain inspectable, and their original configuration can still continue them. The host should invalidate any scheduler approval that covered the prior execution configuration.
+Installation configuration changes apply to **new ACP processes**, not already
+executing turns. Stop or finish existing work before reconnecting. Continuing a
+saved session requires its compatible [provider identity](provider-identity.md);
+an incompatible installation change does not translate historical state. The
+host should invalidate any scheduler approval that covered the prior execution
+configuration. Supported [per-session model and reasoning choices](acp-optional-capabilities.md#session-model-and-reasoning-choices)
+are a separate explicit interface with their own history and active-turn checks.
 
 Configuration contains credential references: environment variable names for API keys, and a private credentials-file path for an explicitly connected ChatGPT account. Keep actual secrets in the host's private secret store or the account flow. Workspace file tools cannot read the runtime home. Do not place credentials in instructions, profiles, model options, or the exposed workspace.
 
