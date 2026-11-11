@@ -1,53 +1,18 @@
 # Steering and repeated input: implementation design
 
-November 4, 2026. Implementation candidate. The
-[runtime overview](runtime-overview.md) describes the components. Deployment
-and provider-account verification are recorded separately from this source design.
+This document defines the native input journal and provider integration. The
+[runtime overview](runtime-overview.md) illustrates the components; the shared
+[input-continuity agreement](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/input-continuity.v1-candidate.md)
+owns cross-component meanings.
 
-## Model support policy across providers
+## Model support and provider integration
 
-Support the latest verified model in each useful class for each provider. Keep
-the choice between capability, speed and cost; maintaining every historical
-generation is not a product requirement. This is the default support policy,
-not a claim that a model listing alone establishes working integration.
-
-On November 4, 2026, Anthropic's current classes are Fable 5.1, Opus 5.5,
-Sonnet 5.5 and Haiku 5.5. Treat these as a dated catalog, not permanent IDs.
-See the [official model catalog](https://platform.claude.com/docs/en/models/overview).
-Other providers follow the same class-based policy. Specialized image, audio
-and decision models have their own classes and capability checks.
-
-Resolve a class to a supported model during configuration or an explicit update,
-then persist the concrete model ID and route. Prefer a versioned ID where the
-provider exposes one; record when an upstream alias cannot be pinned. Do not
-follow a moving default between calls in an active logical turn. Updating our
-catalog does not silently upgrade an installation or rewrite a saved session's
-provider binding. Preserve history and create an explicit new execution context
-when changing that binding; never transfer opaque provider reasoning state to
-an incompatible model.
-
-Maintain capability records for each supported model and access route: transport,
-steering, tool choice, reasoning controls, structured output, media, progress
-events and continuation constraints. Validate current protocol rules instead of
-keeping legacy branches solely for retired generations. For example,
-[Fable 5.1](https://platform.claude.com/docs/en/models/fable-5-1/overview)
-rejects forced tool use, limits which models can read its thinking blocks, and
-offers optional readable progress updates between tool calls. Those differences
-need explicit handling and tests; family membership alone is insufficient.
-
-Azure deployments, hosted gateways and regional/account availability may lag
-the provider's primary catalog. Validate the actual route and give a clear
-setup action if the selected model is unavailable. Do not silently downgrade,
-change providers or change billing routes. User-operated compatible servers
-remain configurable; arbitrary served model names do not become a promise of
-first-class model support. Independent third-party ACP engines retain their own
-model policies.
-
-Remove obsolete generation-specific options, fallbacks and tests when replacing
-them with verified current behavior. Keep migration fixtures and historical
-records that protect saved work. Before promoting a replacement in a class,
-check tool execution, continuation/reload, multiple incoming messages, explicit
-cancellation, progress, and the native capabilities offered for that class.
+The shared [model-support agreement](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/model-support.v1-candidate.md)
+owns support policy. This engine's [provider definitions](providers.md),
+[provider identity](provider-identity.md) and [explicit session choices](acp-optional-capabilities.md#session-model-and-reasoning-choices)
+define concrete configuration, history compatibility and request behavior.
+Provider catalogs and account availability must be inspected when selecting work;
+this contract does not maintain a dated model inventory.
 
 ### Native OpenAI generation
 
@@ -86,9 +51,8 @@ commits its durable receipt while holding that gate. Avoid holding a database tr
 A single writer integrates admitted input into session history and records its
 model-request association. Callers never concurrently mutate `session.items`.
 
-The intended behavior is defined in the family input-continuity candidate.
-Implementation should add a link to its published revision once that contract is
-merged; until then the two review changes form one coordinated design.
+The shared [input-continuity agreement](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/input-continuity.v1-candidate.md)
+defines the meanings consumers rely on; this document owns the native mechanism.
 
 ## OpenAI event loop
 

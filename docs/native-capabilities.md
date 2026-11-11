@@ -1,6 +1,6 @@
 # Native model capabilities
 
-Version 0.3 adds provider-hosted tools, inline media, structured output, and independent decision services. The model/tool loop remains native Rust. ACP carries ordinary image, audio, resource, text, and tool events; Slack, browser, and editor rendering remain client responsibilities.
+Native capabilities include provider-hosted tools, inline media, structured output, and independent decision services. The model/tool loop remains native Rust. ACP carries ordinary image, audio, resource, text, and tool events; Slack, browser, and editor rendering remain client responsibilities.
 
 Capabilities are configured for an installation and its selected model. They are not inferred from a model name. An unsupported combination produces a provider error; it does not silently switch models, accounts, or output formats.
 
@@ -40,13 +40,40 @@ Limits are explicit: 16 MiB per base64 media part, four prompt media parts, 20 M
 
 Provider-hosted tools execute in the provider's environment and may incur separate costs. Enabling them is an installation-level grant; ACP workspace modes continue to govern local file/command/MCP actions, not the provider's hosted interpreter or searches. The runtime does not convert decision scores or personas into authorization.
 
-## Verified scope
+## Validation and scope
 
-Real integration checks completed OpenAI image generation, image editing after reconnect, a permissioned exact-byte image save, web search, and hosted code execution with automatic file download and exact-byte verification; Gemini image generation and replay; and Anthropic web search plus hosted code execution, citations, and replay. The remaining tool combinations use protocol fixtures or require a configured provider resource. Fixtures cover all eight HTTP protocols' vision/schema request formats, Azure media transport, file-reference isolation, private continuation fields, and rejection/cancellation paths. The browser clients separately verify image rendering and persistence with real ACP fixture processes.
+Exercise configured media, hosted tools and structured output through the actual
+provider route before claiming support for an account/model combination. Include
+reconnect/replay, exact-byte artifact handling, private continuation preservation,
+permission/cancellation and the client's rendering or delivery. Local fixtures
+check protocol shapes and refusal boundaries; they do not establish live account
+entitlement or delivered quality. Use [validation](validation.md) and the
+applicable source checks rather than a historical release test count.
 
 Not implemented: native computer control for non-Responses protocols, hosted remote-MCP approval bridging, realtime duplex audio/video, video-generation jobs, embeddings/index administration, non-PDF binary prompt ingestion, automatic model capability discovery, or provider cache management. These have distinct execution or data lifecycles and are not advertised as supported through a generic JSON pass-through.
 
 References: [OpenAI tools](https://developers.openai.com/api/docs/guides/tools), [OpenAI image generation](https://developers.openai.com/api/docs/guides/tools-image-generation), [Anthropic server tools](https://platform.claude.com/docs/en/agents-and-tools/tool-use/server-tools), [Anthropic code execution](https://platform.claude.com/docs/en/agents-and-tools/tool-use/code-execution-tool), [Gemini image generation](https://ai.google.dev/gemini-api/docs/generate-content/image-generation), and [Gemini generateContent](https://ai.google.dev/api/generate-content).
+
+## Inspecting and sharing local images
+
+`workspace_view_image` reads a PNG/JPEG/GIF/WebP inside the session's granted
+workspace and gives the model visual evidence. `workspace_attach_image` explicitly
+attaches that saved image to the current ACP conversation (maximum 2 MiB).
+This explicit attachment is response output in every session mode,
+including read-only and ask, and needs no separate write approval. It reads an
+already permitted file without changing it. Workspace roots, image validation
+and the size limit still apply; viewing an image does not publish it. File
+writes, commands and external tool effects retain their existing permissions.
+The ACP client decides how attachments are displayed or delivered, such as a
+Slack file upload. The runtime does not choose another destination or fetch a
+remote URL when attaching.
+
+Standard MCP image results are retained as attributed visual tool evidence and
+replayed in tool cards. Images are passed through the existing provider image
+codecs, without embedding base64 in truncated text. Tool observations never
+become outgoing attachments automatically; tool-provided private runtime fields
+cannot request publication. Reloading a session shows saved tool images without
+rerunning a capture or uploading an attachment again.
 
 ## PDF input
 
@@ -65,7 +92,6 @@ this is a bounded transport, not a PDF sanitizer or a guarantee of model fidelit
 See the provider contracts: [OpenAI file inputs](https://developers.openai.com/api/docs/guides/file-inputs),
 [Anthropic PDF support](https://platform.claude.com/docs/en/build-with-claude/pdf-support),
 and [Gemini document processing](https://ai.google.dev/gemini-api/docs/document-processing).
-
 
 ## Native computer/browser control
 

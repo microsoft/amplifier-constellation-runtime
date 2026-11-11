@@ -28,8 +28,20 @@ Each provider converts the saved conversation and tool definitions into its own 
 
 Provider continuation remains private: Responses items are retained intact; other protocols store their native assistant message alongside normalized public text/tool records. This preserves Anthropic thinking signatures, Gemini thought signatures, and supported private reasoning fields through tool calls and restarts. Only outward response text and tool observations go to ACP clients. Raw reasoning is not displayed. A complete, validated response is required before a tool can execute; interrupted streams never start an effect.
 
-Each exercised session is pinned to its provider, endpoint, model/deployment, and optional Azure API version. Credential rotation is allowed; changing those context boundaries requires a new session. The additive database migration preserves pre-0.2 OpenAI transcripts. Use `configure-provider` to change an installation: it pins legacy transcripts to the old configuration before switching. Do not manually rewrite a legacy configuration before its first upgrade or pinning. Existing ACP processes keep the configuration they started with; reconnect to use a new one.
+Provider, endpoint, account-route and saved-history compatibility follow the
+[provider identity contract](provider-identity.md). Explicit per-session model
+and reasoning choices follow the [ACP capability contract](acp-optional-capabilities.md#session-model-and-reasoning-choices):
+installation-approved same-route model choices can accept empty or ordinary
+text-only histories; tool, media, private-continuation and unknown history shapes
+refuse a model change. Incompatible private state is not implicitly converted.
 
+Use `configure-provider` for an installation-level provider change: it pins legacy
+transcripts to the old configuration before switching. Do not manually rewrite an
+unbound legacy configuration before pinning. Existing ACP processes retain their
+captured installation configuration; reconnect to use a changed one. This is
+separate from durable per-session choices resolved at turn admission.
+
+Local and MCP function calls execute sequentially within one model/tool loop.
 Before a tool effect, the function call is persisted. The actual returned result is then persisted. Recovery supplies an explicit unknown-outcome result for unmatched calls; it never executes the old call again. Session mutation and tool execution are protected by an installation-local lock file per session. Multiple independent sessions can run concurrently within configured process capacity.
 
 File operations use a directory capability rooted in the workspace. Parent traversal, symlink escape, writes through hard links, non-regular file access, and oversized reads/writes are rejected. Linux commands run in bubblewrap with a bounded workspace and system binaries, separate process group, owner-controlled networking (disabled by default), and a clean environment. Command cancellation terminates the group. There is no unrestricted fallback.
@@ -39,7 +51,46 @@ entries for the current mapped identity, named `agent`. This supports ordinary
 user lookups in build and test tools without exposing host accounts, home paths,
 password databases, or credentials. It does not grant network or host access.
 
-MCP stdio startup is disabled by default because it grants host-command authority to the connected client. An owner may enable it explicitly for fully trusted local clients. Those children receive a reduced environment and explicit per-server environment entries, not the model key. HTTP credentials are attached only to the specified server; redirects are disabled. The runtime does not implement sampling or arbitrary client callbacks. Remote side effects cannot be rolled back by closing the connection.
+## Foreground execution and recovery
+
+An ACP connection owns active foreground execution. Disconnecting cancels it.
+The separate Instance background-work service can own explicitly authorized
+work across a browser disconnection. Saved history alone is not a scheduler.
+Conversation replay displays saved results without rerunning tools. Cancellation
+of a remote mutation can leave an unknown effect: inspect its outcome before
+retrying. Closing the connection cannot roll back an external action.
+
+## MCP trust and discovery
+
+Local MCP children receive a reduced environment and explicit per-server entries,
+not the model key. HTTP credentials attach only to the specified server;
+redirects are disabled. The runtime does not implement sampling or arbitrary
+client callbacks.
+
+Client-supplied local MCP programs are disabled by default. For a trusted local
+ACP host, launch `agent-runtime --home /absolute/instance acp --trusted-local-client`.
+This enables standard stdio MCP for that process without changing saved settings.
+Setting `allow_client_stdio_mcp: true` enables it persistently. Either choice gives
+that client authority to start host programs, beyond workspace tools and session
+modes. Remote installations normally keep this restricted. The
+[ACP validation profile](acp-optional-capabilities.md#validation) distinguishes
+trusted-local TCK coverage from the policy-limited default.
+
+The runtime does not infer permission from a persona. MCP annotations alone do
+not grant permission: `trusted_mcp_readonly_urls` names exact HTTP endpoints whose
+read-only declarations are trusted. Other MCP calls require approval, and
+read-only mode denies them. Optional `allowed_mcp_mutations` entries use the exact
+HTTP endpoint plus `#tool_name`, never a client-selected server label. Source
+access is enforced by each provider's credential and audience policy.
+
+Optional MCP integrations can set
+`_meta["io.github.bkrabach.agent-runtime"].optional: true` on their ACP MCP
+descriptor. Failed optional discovery is bounded to five seconds and leaves other
+connections usable, with a redacted degraded-connection report in the agent's
+instructions, `runtime_capabilities`, and turn observations. Server aliases retain
+the original descriptor index. Required connections remain required. Reload a
+session to retry discovery; uncertain tool actions are never automatically replayed.
+This is an optional namespaced extension, not a requirement of standard ACP.
 
 ## Credentials and storage
 

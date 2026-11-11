@@ -2,17 +2,14 @@
 
 The runtime binds saved conversations to their provider, endpoint, model and API
 version. An explicit ChatGPT account registration is also part of that identity.
-Rotating an API credential does not change it. A different provider destination
-or model remains a rejected continuation; the runtime never transfers opaque
-provider state to that destination automatically.
+Rotating an API credential does not change it. An incompatible installation
+configuration remains a rejected continuation. Explicit per-session model
+selection follows the [ACP capability contract](acp-optional-capabilities.md#session-model-and-reasoning-choices):
+configured same-route choices permit empty or ordinary text-only histories,
+while tool, media, private-continuation and unknown history shapes refuse a model
+change. The runtime never transfers opaque provider state automatically.
 
-Version 0.13.2 fixes an SDK migration regression: a transitive dependency enabled
-`serde_json/preserve_order`, changing the bytes used to hash otherwise identical
-configuration. Older sessions could load and replay normally, then reject the
-next prompt before recording input or making a model request. Tests that created
-only new sessions did not expose this upgrade failure.
-
-Provider fingerprints now use explicit sorted keys, independent of dependency
+Provider fingerprints use explicit sorted keys, independent of dependency
 features. The runtime recognizes both released encodings of the current identity:
 the original sorted form and the SDK-era insertion-order form. It leaves existing
 bindings, conversation history and input receipts intact. This does not waive
@@ -27,7 +24,7 @@ the rejection count and latest rejection. This distinguishes a startup rejection
 from a provider request that failed after work began. Earlier binaries did not
 record this preflight rejection; absence of their event is not evidence of success.
 
-`tests/provider_identity.py` exercises persisted bindings from both encodings
+[The provider-identity fixture](../tests/provider_identity.py) exercises persisted bindings from both encodings
 through real ACP processes and a local provider fixture. It also checks that
 changed destinations remain rejected and that completed effects and uncertain
 inputs are not replayed. No model account is used by these tests.
