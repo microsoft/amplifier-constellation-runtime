@@ -130,7 +130,10 @@ with `version: 1`, `contentBlocks: true`, and `originalHistoryPreserved: true`
 in ACP initialization. Supporting clients may mark a text block with the same
 namespace, `version: 1`, a publisher/conversation/audience-specific `key`, and
 `retainedText` containing the original request and essential continuation state.
-This is an optional extension, not a standard ACP requirement.
+The key is nonempty and at most 256 bytes; retained text is nonempty and at most
+32 KiB. Clients use the envelope only after advertisement, and intermediaries
+preserve block metadata when prepending context. Media and independent instructions
+remain separate blocks. This is an optional extension, not a standard ACP requirement.
 
 Before ordinary budget compaction, the model view keeps the newest valid block
 for each key. Older versions retain their original position and retained text.

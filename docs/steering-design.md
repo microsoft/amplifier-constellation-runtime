@@ -2,12 +2,12 @@
 
 This document defines the native input journal and provider integration. The
 [runtime overview](runtime-overview.md) illustrates the components; the shared
-[input-continuity agreement](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/input-continuity.v1-candidate.md)
+[input-continuity agreement](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/work-continuity.md)
 owns cross-component meanings.
 
 ## Model support and provider integration
 
-The shared [model-support agreement](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/model-support.v1-candidate.md)
+The shared [model-support agreement](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/engine-compatibility.md)
 owns support policy. This engine's [provider definitions](providers.md),
 [provider identity](provider-identity.md) and [explicit session choices](acp-optional-capabilities.md#session-model-and-reasoning-choices)
 define concrete configuration, history compatibility and request behavior.
@@ -51,7 +51,7 @@ commits its durable receipt while holding that gate. Avoid holding a database tr
 A single writer integrates admitted input into session history and records its
 model-request association. Callers never concurrently mutate `session.items`.
 
-The shared [input-continuity agreement](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/input-continuity.v1-candidate.md)
+The shared [input-continuity agreement](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/work-continuity.md)
 defines the meanings consumers rely on; this document owns the native mechanism.
 
 ## OpenAI event loop

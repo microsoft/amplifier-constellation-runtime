@@ -4,7 +4,7 @@ Provider selection belongs inside the native Rust runtime. ACP clients, Slack ad
 
 The runtime supports the latest verified model in each useful provider class,
 with explicit model upgrades and preserved session bindings.
-See the [model support policy](steering-design.md#model-support-policy-across-providers).
+See the [model support policy](steering-design.md#model-support-and-provider-integration).
 Native OpenAI generation uses Responses WebSockets and ordered steering. Other
 providers receive new input at the next legal model-call boundary.
 

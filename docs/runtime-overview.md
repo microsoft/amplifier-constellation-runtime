@@ -28,7 +28,7 @@ flowchart TB
 
 A compatible client can use the engine directly. An optional Instance host can
 supply installed identity, management and authorized context. The umbrella
-[family agreement](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/family.v1-candidate.md)
+[family agreement](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/composition.md)
 defines these service responsibilities and information ownership; this diagram
 illustrates one composition rather than requiring the whole stack.
 
@@ -55,7 +55,7 @@ One interaction can contain several model calls and tools. The
 [server](../src/server.rs), [engine](../src/engine.rs) and
 [provider layer](../src/provider.rs) implement this path. A tool result, the end
 of a prompt and the user's larger outcome remain distinct under the shared
-[interaction agreement](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/experience.v1-candidate.md).
+[interaction agreement](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/interaction.md).
 
 ## Continue the same work
 

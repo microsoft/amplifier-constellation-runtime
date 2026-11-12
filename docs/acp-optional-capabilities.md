@@ -97,7 +97,7 @@ The appended instructions are connection-local. Reconnects must send them again;
 
 Clients may opt in to `com.microsoft.amplifier.message.completion` version 1 through ACP capability metadata. For OpenAI Responses streams, a completed assistant output item emits a bounded text-completion receipt. This lets a conversation adapter post a whole public contribution while later work continues. Private reasoning is never included. The receipt is emitted only when the provider’s completed snapshot matches the streamed text; it does not claim task completion.
 
-Ordinary ACP clients continue to receive the same text chunks and final prompt result. Other providers retain their existing output behavior; adapters must not infer completion from pauses or partial text. See the [conversation delivery contract](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/conversation-delivery.v1-candidate.md).
+Ordinary ACP clients continue to receive the same text chunks and final prompt result. Other providers retain their existing output behavior; adapters must not infer completion from pauses or partial text. See the [conversation delivery contract](https://github.com/microsoft/amplifier-constellation/blob/main/crates/acp-connection/docs/public-speech.md).
 
 ## Protocol version and transport
 

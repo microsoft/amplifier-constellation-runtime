@@ -58,4 +58,4 @@ agent-authored watches. Those advisory results do not grant tool permissions,
 create responsibilities, renew deadlines or prove task completion. The old
 unmerged `participate` CLI proposal is superseded by Instance's optional
 `com.microsoft.amplifier.attention` profile; it is not a runtime requirement.
-See the [family attention contract](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/attention.v1-candidate.md).
+See the [family attention contract](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/interaction.md).

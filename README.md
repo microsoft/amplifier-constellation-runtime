@@ -6,8 +6,8 @@ and connects through Agent Client Protocol (ACP). It calls configured model
 providers directly; another agent framework is not required.
 
 Runtime contributes to the [Constellation vision](https://github.com/microsoft/amplifier-constellation/blob/main/docs/VISION.md).
-The umbrella owns [shared service responsibilities and interfaces](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/family.v1-candidate.md).
-This repository owns the native engine's implementation and detailed contracts.
+The umbrella owns [shared promises](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/README.md);
+this repository owns the native execution boundary and technical interfaces.
 
 ## Find the right starting point
 
@@ -57,29 +57,16 @@ can supply installed identity, authenticated remote access and management.
 [Platform setup](docs/platforms.md) covers the optional managed installation.
 Experiences and domain connectors stay independently owned.
 
-| Local capability | Interface and configuration home |
-| --- | --- |
-| Sessions, content, model/reasoning choices and permission modes | [ACP capabilities](docs/acp-optional-capabilities.md) |
-| Workspace tools, MCP access and execution boundaries | [Architecture](docs/architecture.md#model-and-tools) |
-| Model/provider integration and account routes | [Providers](docs/providers.md), [ChatGPT](docs/chatgpt.md), [Copilot](docs/copilot.md) |
-| Optional media, hosted tools and structured output | [Native capabilities](docs/native-capabilities.md) |
-| Model working context, original history and read-only retrieval | [Context](docs/context.md) |
-| New input during work, receipts and recovery | [Steering](docs/steering-design.md) |
-| Installation configuration and revision-checked changes | [Configuration](docs/configuration.md) |
-| Optional decision, assessment, watch and continuation helpers | [Decisions](docs/decisions.md), [assessment](docs/assessment.md), [watches](docs/watches.md), [continuation](docs/continuation.md) |
-
-Inspect the selected implementation and configuration before relying on a
-capability. MCP program startup, workspace commands and external actions have
-different trust boundaries; the [architecture](docs/architecture.md) and
-[platform documentation](docs/platforms.md) define them. A compatible transport
-alone establishes neither provider quality nor permission to act.
+The [technical interface map](contracts/README.md#technical-interfaces) locates
+sessions, providers, tools, context, configuration and optional helpers without
+making every capability prerequisite reading. The [execution agreement](contracts/execution.md)
+identifies the native engine's boundary.
 
 ## Develop and verify
 
-Use the [Constellation working agreement](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/family.v1-candidate.md#developing-the-family)
-and read only the local contracts affected by the outcome. Explore engine
-improvements independently within those promises; settle a changed producer or
-consumer expectation with its owner before dependent work relies on it.
+Use [Converge](https://github.com/microsoft/amplifier-converge) and the
+[execution agreement](contracts/execution.md) to choose and coordinate the next
+useful outcome.
 
 ```sh
 cargo fmt --check

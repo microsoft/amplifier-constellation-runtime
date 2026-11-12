@@ -1,54 +1,35 @@
-# A dependable engine for persistent work
+# A dependable engine for continuing work
 
-Constellation Runtime should let people and experiences entrust useful work to an
-agent without rebuilding reasoning, tool execution and recovery for each new
-connection. Its contribution is an engine that can think with the models its owner
-chooses, use authorized tools, retain what happened and continue coherently as
-input and circumstances change.
+Constellation Runtime turns a request into model reasoning, permitted tool use and
+a saved account of what happened. People should be able to entrust useful work to
+an agent, correct its course and understand its results without supervising every
+model call.
 
-The engine is one part of the [Constellation ambition](https://github.com/microsoft/amplifier-constellation/blob/main/docs/VISION.md).
-The [family agreement](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/family.v1-candidate.md)
-defines how it fits with installed identity, conversation services, experiences
-and domains. This vision focuses on the value of the native implementation.
+It is one engine within the [Constellation ecosystem](https://github.com/microsoft/amplifier-constellation/blob/main/docs/VISION.md).
+Compatible clients can use it directly. An optional Instance supplies installed
+identity and management; experiences and connectors bring conversations and domain
+capabilities. Runtime owns the reasoning and execution inside that composition.
 
-## Useful work that remains understandable
+## Carry useful work through change
 
-An agent should be able to carry a substantial assignment through model calls,
-tools, new information and interruptions while preserving a faithful record.
-People should spend their attention on intent and consequential choices, with
-enough evidence to understand results and intervene when needed. Improving the
-engine means improving that whole outcome, not just producing more tokens or
-making a single response faster.
+Imagine an agent preparing a briefing. A correction arrives while it gathers
+sources. The engine should incorporate that direction, retain completed work and
+continue through the tools and model route its owner selected. If execution stops,
+its record should help establish what can continue safely.
 
-Original evidence and a model's working context serve different purposes. The
-engine should make context useful and economical without treating a summary as
-a replacement for what actually happened. A corrected request should inform the
-remaining work. Recovery should help establish what can safely continue rather
-than make uncertain actions look successful.
+Original evidence and a model's working context serve different purposes. Context
+handling should make long work economical and coherent without replacing the
+record of what actually happened. Provider integration should make the owner's
+choices useful without requiring each experience to implement another model loop.
 
-## Room for deep independent improvement
+## Improve the whole outcome
 
-Provider integration, model working context, reasoning and tool execution,
-session continuity and execution quality are substantial areas of investment.
-The early implementation does not bound their future depth. Owners should be
-able to improve them while clients and domains rely on declared interfaces.
-The [local contract map](../contracts/README.md) locates those commitments.
+Reasoning quality, tools, provider integration, context and recovery all offer room
+for independent improvement behind dependable interfaces. Measure the result and
+human effort alongside latency, resource use and failure behavior. A quicker
+response or smaller prompt is useful only when it supports the work.
 
-Standard ACP makes this engine useful to independent clients. Optional native
-capabilities can expose richer behavior without making every consumer adopt the
-same host, model provider or product experience. Future interfaces may present
-the same work very differently; the engine supplies dependable execution and
-observations rather than prescribing their UX.
-
-## How to judge an improvement
-
-Exercise a meaningful piece of work through its actual client and tools. Observe
-the result, correction behavior, permissions, context growth, latency and
-recovery together. Distinguish tool observations from independently checked
-effects and requester acceptance. A local fixture can expose a defect; it cannot
-establish every model's quality or every installation's behavior.
-
-Choose the next useful work by comparing this intent and the relevant contracts
-with current evidence. Use the shared [Converge practice](https://github.com/microsoft/amplifier-constellation/blob/main/docs/working-together.md)
-to coordinate changed promises and carry decisions into active work. Keep the
-implementation and its explanations simpler as understanding improves.
+The [execution agreement](../contracts/execution.md) states this engine's local
+boundary. The umbrella owns [shared promises](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/README.md).
+Technical interfaces remain available for contributors deepening a capability;
+they do not prescribe the product experience built around the engine.
