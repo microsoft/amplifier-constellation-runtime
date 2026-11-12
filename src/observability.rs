@@ -41,6 +41,7 @@ pub fn inspect(store: &Store) -> Result<Value> {
                 | "context.compaction.started"
                 | "context.compaction.failed"
                 | "context.compacted"
+                | "context.limit"
                 | "turn.finished"
                 | "turn.rejected"
         ) {
@@ -60,6 +61,7 @@ pub fn inspect(store: &Store) -> Result<Value> {
                 "history_bytes",
                 "model_items",
                 "model_context_bytes",
+                "counted_model_context_bytes",
                 "instructions_bytes",
                 "tool_definitions_bytes",
                 "tool_definitions",
@@ -97,6 +99,7 @@ pub fn inspect(store: &Store) -> Result<Value> {
                 Some("turn_deadline") => "turn_deadline",
                 Some("tool_call_budget") => "tool_call_budget",
                 Some("model_call_budget" | "max_turn_requests") => "model_call_budget",
+                Some("active_turn_context_capacity") => "active_turn_context_capacity",
                 Some("max_tokens") => "output_limit",
                 Some("refusal") => "refusal",
                 _ => "failure_or_unknown",

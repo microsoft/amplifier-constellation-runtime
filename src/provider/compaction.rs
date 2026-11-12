@@ -101,6 +101,16 @@ fn server_window(original: &[Value], base: Vec<Value>) -> Vec<Value> {
 }
 
 impl Provider {
+    /// Serialize context maintenance or a local capacity stop with the socket's
+    /// steering owner. Accepted successors must settle before the engine ends
+    /// the turn; a successful claim holds new inputs locally.
+    pub(crate) async fn claim_context_boundary(&mut self) -> Result<bool> {
+        match self.websocket.as_mut() {
+            Some(socket) => socket.begin_compaction().await,
+            None => Ok(true),
+        }
+    }
+
     pub(crate) fn native_context(&self) -> bool {
         self.config.context.auto_compact
             && self.config.context.provider_compaction
@@ -175,10 +185,7 @@ impl Provider {
         // durable/local during maintenance, and accepted steering is never
         // cancelled or replayed to obtain a smaller model window.
         let can_compact = if due && self.config.provider.kind == ProviderKind::Openai {
-            match self.websocket.as_mut() {
-                Some(socket) => socket.begin_compaction().await?,
-                None => true,
-            }
+            self.claim_context_boundary().await?
         } else {
             true
         };
