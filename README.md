@@ -21,11 +21,15 @@ this repository owns the native execution boundary and technical interfaces.
 
 ## Start one agent
 
-Build with Rust 1.88 or later:
+Download an archive for your computer from
+[Releases](https://github.com/microsoft/amplifier-constellation-runtime/releases),
+verify its checksum and unpack it. Running that executable does not require Rust,
+Python, Node, WSL or a separate agent framework. Only the assets present in a
+release are available; [platform setup](docs/platforms.md) describes native
+packaging, tool isolation and optional integration requirements.
 
 ```sh
-cargo build --release --locked
-./target/release/agent-runtime --home "$PWD/instance" init \
+./agent-runtime --home "$PWD/instance" init \
   --workspace "$PWD/workspace" --name "My agent" --model gpt-6.1-sol
 ```
 
@@ -72,6 +76,7 @@ useful outcome.
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
+cargo build --release --locked
 ```
 
 The [validation guide](docs/validation.md) covers additional real ACP subprocess,

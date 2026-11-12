@@ -16,6 +16,11 @@ cargo clippy --locked --all-targets -- -D warnings
 ```
 
 See the test scripts and CI workflow for prerequisites and platform conditions.
+The native matrix also runs protocol, permission, session-load and helper checks
+against the release executable before packaging. `python3 tests/package_release.py`
+checks architecture refusal, Windows runtime imports, version/provenance binding
+and reproducible archive contents. The package script needs the actual native
+executable for its version check; a cross-build alone does not complete that step.
 Browser tests use disposable local services and require Playwright/Chromium.
 Linux service tests may require PAM development headers; isolated command tests
 also need the documented OS isolation prerequisites. Opt-in real account, model,
