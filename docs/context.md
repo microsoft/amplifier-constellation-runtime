@@ -24,10 +24,19 @@ in the same session, where the previous completed continuation can be archived.
 Runtime neither retries that prompt nor replays its tools.
 
 This outcome requires settled provider/tool transport and an atomic input-close
-boundary. Unincorporated input, uncertain tool errors, oversized initial inputs,
-disabled compaction and native compaction/provider failures retain their error
-handling. Cancellation still wins. The context limit and saved observations are
-unchanged; no work authority or permission to retry uncertain effects is granted.
+boundary. It also applies when additional, never-forwarded input would overflow
+an otherwise fitting continuation. All locally received inputs are retained with
+their original IDs, content and order as `notAccepted`, with reason
+`active_turn_context_capacity`; none is incorporated into history or replayed.
+Admission racing this boundary either receives that durable disposition or
+`promptRequired`. A later request needs its own authorized lifecycle.
+
+Submitted or remotely queued input, unrecorded incorporation, uncertain tool
+errors, oversized initial inputs, disabled compaction and native
+compaction/provider failures retain their error handling. Cancellation still
+wins. The context limit and saved observations are unchanged; a settled runtime
+invocation does not certify asynchronous world effects or grant permission to
+retry them.
 
 The saved transcript stays intact. Model requests use a separate working window.
 For recorded MCP calls, that window omits a text fallback only when its entire
@@ -114,9 +123,15 @@ reasons. Original transcript bytes and model-window bytes are separate.
 `model_context_bytes` retains its serialized-JSON measurement;
 `counted_model_context_bytes` records the distinct byte-budget measurement,
 excluding duplicated ACP prompt metadata and applying the configured media
-accounting. A local capacity stop records a content-free `context.limit` event
-with its required and available context bytes. These byte counts are not token
-estimates. Counts cover the stated stored-event sample; engine model steps, provider-created
+accounting. A closed capacity boundary records a content-free `context.limit`
+event with its required and available context bytes, whether pressure arose in the
+active continuation or after adding pending input, and input-state counts.
+`context.rejected` records the same local measurements when an unsettled boundary
+or another existing condition prevents yielding. Diagnostics expose this as
+`latest_capacity`, with an allowlisted blocker and no input text or IDs.
+`turn.finished` and `latest_stop` carry the final turn disposition; cancellation
+or uncertain cleanup can still supersede a closed capacity boundary. These
+byte counts are not token estimates. Counts cover the stated stored-event sample; engine model steps, provider-created
 responses and usage notifications are different measurements. Missing usage is
 not zero cost. Compaction usage is separately recorded in `context.compacted`.
 No monetary savings are inferred from cache tokens or reduced input bytes.

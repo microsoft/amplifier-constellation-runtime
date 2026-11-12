@@ -32,6 +32,74 @@ impl Turn<'_> {
         .await
     }
 
+    /// Close only at an already settled provider/tool boundary. Locally queued
+    /// input remains in its original receipt, never forwarded or added to history.
+    async fn close_at_capacity(
+        &self,
+        provider: &mut Provider,
+        capacity: &crate::context::ActiveTurnCapacity,
+        boundary: &str,
+        calls: (usize, usize),
+        mut blocker: Option<&str>,
+    ) -> Result<Option<&'static str>> {
+        let mut boundary_error = None;
+        if self.cancel.is_cancelled() {
+            blocker = Some("cancelled");
+        }
+        if blocker.is_none() {
+            match provider.claim_context_boundary().await {
+                Ok(true) => {}
+                Ok(false) => blocker = Some("provider_boundary_unsettled"),
+                Err(error) => {
+                    blocker = Some("provider_boundary_error");
+                    boundary_error = Some(error);
+                }
+            }
+        }
+        if blocker.is_none()
+            && !self
+                .inbox
+                .try_close_at_capacity("active_turn_context_capacity")?
+        {
+            blocker = Some("pending_input_unsettled");
+        }
+        // Stop may arrive while the socket owner grants the boundary. It wins
+        // over a capacity terminal, without changing any retained input identity.
+        if self.cancel.is_cancelled() {
+            blocker = Some("cancelled");
+        }
+        let mut input_states = std::collections::BTreeMap::<String, usize>::new();
+        for input in self.inbox.summary()?.as_array().unwrap() {
+            if let Some(state) = input["state"].as_str() {
+                *input_states.entry(state.to_owned()).or_default() += 1;
+            }
+        }
+        self.store.event(
+            &self.session.id,
+            Some(&self.inbox.turn),
+            if blocker.is_none() {
+                "context.limit"
+            } else {
+                "context.rejected"
+            },
+            json!({
+                "reason":"active_turn_context_capacity", "capacity_boundary":boundary,
+                "model_calls":calls.0, "tool_calls":calls.1,
+                "available_context_bytes":capacity.available_bytes,
+                "required_context_bytes":capacity.required_bytes,
+                "full_history_preserved":true, "yield_blocker":blocker,
+                "input_states":input_states,
+            }),
+        )?;
+        if blocker == Some("cancelled") {
+            return Ok(Some("cancelled"));
+        }
+        if let Some(error) = boundary_error {
+            return Err(error);
+        }
+        Ok(blocker.is_none().then_some("active_turn_context_capacity"))
+    }
+
     async fn run_locked(mut self, prompt: Vec<Value>) -> Result<Value> {
         self.store
             .recover_inputs(&self.session.id, Some(&self.inbox.turn))?;
@@ -246,6 +314,19 @@ impl Turn<'_> {
                 fixed_bytes < self.config.limits.max_context_bytes,
                 "Instructions and tool definitions exceed the context budget"
             );
+            let capacity_blocker = if !self.config.context.auto_compact {
+                Some("compaction_disabled")
+            } else if call_index == 0 {
+                Some("initial_request")
+            } else if tool_count == 0 {
+                Some("no_tool_iteration")
+            } else if !tool_results_known {
+                Some("tool_outcome_uncertain")
+            } else if provider_continuation_only {
+                Some("provider_continuation")
+            } else {
+                None
+            };
             let prepared = provider
                 .prepare_context(
                     &self.session.items,
@@ -261,34 +342,49 @@ impl Turn<'_> {
                 Err(error) => {
                     if let Some(capacity) =
                         error.downcast_ref::<crate::context::ActiveTurnCapacity>()
-                        && call_index > 0
-                        && tool_count > 0
-                        && tool_results_known
-                        && !provider_continuation_only
-                        && provider.claim_context_boundary().await?
-                        && self.inbox.try_close()?
+                        && let Some(stop) = self
+                            .close_at_capacity(
+                                &mut provider,
+                                capacity,
+                                "active_continuation",
+                                (call_index, tool_count),
+                                capacity_blocker,
+                            )
+                            .await?
                     {
-                        if self.cancel.is_cancelled() {
-                            return Ok("cancelled");
-                        }
-                        self.store.event(
-                            &self.session.id,
-                            Some(turn),
-                            "context.limit",
-                            json!({"reason":"active_turn_context_capacity","model_calls":call_index,"tool_calls":tool_count,"available_context_bytes":capacity.available_bytes,"required_context_bytes":capacity.required_bytes,"full_history_preserved":true}),
-                        )?;
-                        return Ok("active_turn_context_capacity");
+                        return Ok(stop);
                     }
                     return Err(error);
                 }
             };
             view.items
                 .extend(provider.boundary_inputs.iter().map(|p| p.item.clone()));
+            let required_bytes = crate::media::context_bytes(&view.items)?;
+            let available_bytes = self.config.limits.max_context_bytes - fixed_bytes;
+            if required_bytes > available_bytes {
+                let capacity = crate::context::ActiveTurnCapacity {
+                    required_bytes,
+                    available_bytes,
+                };
+                if let Some(stop) = self
+                    .close_at_capacity(
+                        &mut provider,
+                        &capacity,
+                        "pending_inputs",
+                        (call_index, tool_count),
+                        capacity_blocker,
+                    )
+                    .await?
+                {
+                    return Ok(stop);
+                }
+                anyhow::bail!(
+                    "Pending input exceeds model context capacity; no incorporation claimed"
+                );
+            }
             ensure!(
-                crate::media::context_bytes(&view.items)? + fixed_bytes
-                    <= self.config.limits.max_context_bytes
-                    && crate::media::request_fits(&view.items)?,
-                "Pending input exceeds model context capacity; no incorporation claimed"
+                crate::media::request_fits(&view.items)?,
+                "Model request exceeds its request byte limit; no incorporation claimed"
             );
             if let Some(checkpoint) = &view.checkpoint
                 && self.store.checkpoint(
@@ -800,5 +896,97 @@ pub fn recover_pending_tools(items: &mut Vec<Value>) {
         .collect();
     for id in missing {
         items.push(json!({"type":"function_call_output","call_id":id,"output":"Execution was interrupted or stopped before a durable result was recorded. Outcome is unknown; inspect the current state before proposing any retry. This call was not automatically replayed."}));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn capacity_helper_preserves_cancelled_stop_without_disposing_local_input() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let directory = tempfile::tempdir().unwrap();
+            let store = Store::open(directory.path().into()).unwrap();
+            let mut session = store
+                .create(directory.path().into(), Mode::ReadOnly)
+                .unwrap();
+            session
+                .items
+                .push(json!({"role":"user","content":"original history"}));
+            store.save(&session).unwrap();
+            let history = session.items.clone();
+            let inbox = Arc::new(crate::steering::Inbox::new(store.clone(), &session.id).unwrap());
+            inbox
+                .admit(
+                    "original-input",
+                    json!({
+                        "role":"user", "content":"original source",
+                        "_acp_prompt":[{"type":"text","text":"original source"}]
+                    }),
+                )
+                .unwrap();
+            let receipts = store.input_receipts(&session.id).unwrap();
+
+            let mut config =
+                Config::initial(directory.path().into(), "fixture".into(), "mock".into());
+            config.provider =
+                crate::config::Provider::preset(crate::config::ProviderKind::Mock, "mock".into());
+            let mut provider = Provider::new(&config).unwrap();
+            let (agent, _client) = tokio::io::duplex(1024);
+            let (reader, writer) = tokio::io::split(agent);
+            let connection = amplifier_acp_connection::Connection::agent(reader, writer, 1024)
+                .await
+                .unwrap();
+            let peer = Peer::new(connection.sender.clone());
+            let cancel = CancellationToken::new();
+            cancel.cancel();
+            let turn = Turn {
+                config: &config,
+                store: &store,
+                peer: &peer,
+                session,
+                mcp: Arc::new(mcp::Tools::connect(&[]).await.unwrap()),
+                cancel,
+                inbox: inbox.clone(),
+            };
+
+            // Call the helper directly: run_locked's cancellation select must not
+            // mask a helper that incorrectly reports capacity failure instead.
+            let stop = turn
+                .close_at_capacity(
+                    &mut provider,
+                    &crate::context::ActiveTurnCapacity {
+                        available_bytes: 1,
+                        required_bytes: 2,
+                    },
+                    "pending_inputs",
+                    (1, 1),
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(stop, Some("cancelled"));
+            assert_eq!(store.input_receipts(&turn.session.id).unwrap(), receipts);
+            assert_eq!(store.load(&turn.session.id).unwrap().items, history);
+            let events = store.events(&turn.session.id).unwrap();
+            let events = events.as_array().unwrap();
+            assert!(!events.iter().any(|event| event["kind"] == "context.limit"));
+            let rejected: Vec<_> = events
+                .iter()
+                .filter(|event| event["kind"] == "context.rejected")
+                .collect();
+            assert_eq!(rejected.len(), 1);
+            assert_eq!(rejected[0]["data"]["yield_blocker"], "cancelled");
+            assert_eq!(rejected[0]["data"]["input_states"], json!({"received":1}));
+            assert_eq!(
+                inbox
+                    .admit("later-input", json!({"content":"still local"}))
+                    .unwrap()["outcome"],
+                "injected"
+            );
+        })
+        .await
+        .expect("local cancellation regression exceeded its deadline");
     }
 }

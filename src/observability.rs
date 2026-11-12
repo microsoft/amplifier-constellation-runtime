@@ -25,6 +25,7 @@ pub fn inspect(store: &Store) -> Result<Value> {
     let mut latest_context = Value::Null;
     let mut latest_stop = Value::Null;
     let mut latest_rejection = Value::Null;
+    let mut latest_capacity = Value::Null;
     let mut input = 0u64;
     let mut output = 0u64;
     let mut cached = 0u64;
@@ -42,6 +43,7 @@ pub fn inspect(store: &Store) -> Result<Value> {
                 | "context.compaction.failed"
                 | "context.compacted"
                 | "context.limit"
+                | "context.rejected"
                 | "turn.finished"
                 | "turn.rejected"
         ) {
@@ -49,6 +51,11 @@ pub fn inspect(store: &Store) -> Result<Value> {
         }
         *counts.entry(kind.clone()).or_default() += 1;
         let v: Value = serde_json::from_str(raw)?;
+        if matches!(kind.as_str(), "context.limit" | "context.rejected")
+            && latest_capacity.is_null()
+        {
+            latest_capacity = capacity_summary(kind, at, &v);
+        }
         if kind == "turn.rejected" && latest_rejection.is_null() {
             let known =
                 v["stage"] == "provider_binding" && v["reason"] == "provider_identity_mismatch";
@@ -119,7 +126,76 @@ pub fn inspect(store: &Store) -> Result<Value> {
     };
     let mut report = json!({"profile":"agent-runtime.observability/1","coverage":{"events_in_store":total,"sampled_events":rows.len(),"first_seq":rows.last().map(|r|r.0),"last_seq":rows.first().map(|r|r.0),"complete_store_window":total==rows.len() as i64},"counts":counts,"stop_reasons":reasons,"model_step_latency_ms":{"samples":latency.len(),"p50":percentile(50),"p95":percentile(95)},"reported_usage":{"measured_responses":measured,"input_tokens":(measured>0).then_some(input),"output_tokens":(output_samples>0).then_some(output),"cache_read_tokens":(cached_samples>0).then_some(cached),"cache_measured_responses":cached_samples,"cost":null},"latest_context":latest_context,"latest_stop":latest_stop,"notes":["Model steps are engine requests; provider-created responses are counted separately when observed. Usage updates are not request counts.","Usage is provider-reported. Compaction usage is separate in context.compacted events. Cache tokens are not a cost-savings percentage.","No source text, tool arguments, private reasoning or compaction state is included."]});
     report["latest_rejection"] = latest_rejection;
+    report["latest_capacity"] = latest_capacity;
     Ok(report)
+}
+
+fn capacity_summary(kind: &str, at: &str, data: &Value) -> Value {
+    // Diagnostic labels come from closed vocabularies. Event data can contain
+    // private payloads or future fields; never copy their arbitrary strings.
+    let reason = match data["reason"].as_str() {
+        Some("active_turn_context_capacity") => "active_turn_context_capacity",
+        _ => "unknown",
+    };
+    let boundary = match data["capacity_boundary"].as_str() {
+        Some("active_continuation") => "active_continuation",
+        Some("pending_inputs") => "pending_inputs",
+        _ => "unknown",
+    };
+    let blocker = match data.get("yield_blocker") {
+        Some(Value::Null) => Value::Null,
+        Some(Value::String(value))
+            if matches!(
+                value.as_str(),
+                "compaction_disabled"
+                    | "initial_request"
+                    | "no_tool_iteration"
+                    | "tool_outcome_uncertain"
+                    | "provider_continuation"
+                    | "provider_boundary_unsettled"
+                    | "provider_boundary_error"
+                    | "pending_input_unsettled"
+                    | "cancelled"
+            ) =>
+        {
+            json!(value)
+        }
+        _ => json!("unknown"),
+    };
+    let mut input_states = serde_json::Map::new();
+    for state in [
+        "received",
+        "submitted",
+        "remoteQueued",
+        "incorporated",
+        "notAccepted",
+        "unknown",
+    ] {
+        if let Some(count) = data["input_states"][state].as_u64() {
+            input_states.insert(state.into(), json!(count));
+        }
+    }
+    let mut summary = json!({
+        "at":at,
+        "event":kind,
+        "outcome":if kind == "context.limit" {"boundary_closed"} else {"rejected"},
+        "reason":reason,
+        "capacity_boundary":boundary,
+        "yield_blocker":blocker,
+        "full_history_preserved":data["full_history_preserved"].as_bool(),
+        "input_states":input_states,
+    });
+    for measurement in [
+        "model_calls",
+        "tool_calls",
+        "required_context_bytes",
+        "available_context_bytes",
+    ] {
+        if let Some(count) = data[measurement].as_u64() {
+            summary[measurement] = json!(count);
+        }
+    }
+    summary
 }
 #[cfg(test)]
 mod tests {
@@ -154,5 +230,139 @@ mod tests {
         assert_eq!(report["counts"]["turn.rejected"], 1);
         assert_eq!(report["latest_rejection"]["reason"], "unknown");
         assert_eq!(report["latest_rejection"]["model_started"], false);
+        assert!(report["latest_capacity"].is_null());
+    }
+
+    #[test]
+    fn latest_capacity_preserves_known_measurements_and_distinguishes_closed_boundary_from_refusal()
+    {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().into()).unwrap();
+        let measurements = json!({
+            "reason":"active_turn_context_capacity", "capacity_boundary":"active_continuation",
+            "model_calls":3, "tool_calls":7, "required_context_bytes":197086,
+            "available_context_bytes":196913, "full_history_preserved":true,
+            "yield_blocker":null,
+            "input_states":{"received":0,"submitted":1,"remoteQueued":2,"incorporated":3,"notAccepted":4,"unknown":5},
+        });
+        store
+            .event(
+                "private-session",
+                Some("private-turn"),
+                "context.limit",
+                measurements.clone(),
+            )
+            .unwrap();
+        let report = inspect(&store).unwrap();
+        let mut expected = measurements.clone();
+        expected["at"] = report["latest_capacity"]["at"].clone();
+        expected["event"] = json!("context.limit");
+        expected["outcome"] = json!("boundary_closed");
+        assert!(expected["at"].is_string());
+        assert_eq!(report["latest_capacity"], expected);
+        assert_eq!(report["counts"]["context.limit"], 1);
+        assert!(report["counts"].get("context.rejected").is_none());
+
+        let mut rejected = measurements;
+        rejected["capacity_boundary"] = json!("pending_inputs");
+        rejected["yield_blocker"] = json!("pending_input_unsettled");
+        store
+            .event(
+                "private-session",
+                Some("private-turn"),
+                "context.rejected",
+                rejected.clone(),
+            )
+            .unwrap();
+        let report = inspect(&store).unwrap();
+        rejected["at"] = report["latest_capacity"]["at"].clone();
+        rejected["event"] = json!("context.rejected");
+        rejected["outcome"] = json!("rejected");
+        assert_eq!(report["latest_capacity"], rejected);
+        assert_eq!(report["counts"]["context.limit"], 1);
+        assert_eq!(report["counts"]["context.rejected"], 1);
+        assert!(report["latest_rejection"].is_null());
+        assert!(!report.to_string().contains("private-session"));
+        assert!(!report.to_string().contains("private-turn"));
+    }
+
+    #[test]
+    fn capacity_projection_drops_private_fields_unknown_labels_and_invalid_counts() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().into()).unwrap();
+        store.event("PRIVATE_SESSION", Some("PRIVATE_TURN"), "context.rejected", json!({
+            "at":"PRIVATE_TIME", "event":"PRIVATE_EVENT", "outcome":"PRIVATE_OUTCOME",
+            "reason":"PRIVATE_REASON", "capacity_boundary":"PRIVATE_BOUNDARY", "yield_blocker":"PRIVATE_BLOCKER",
+            "full_history_preserved":"PRIVATE_CLAIM", "model_calls":-1, "tool_calls":true,
+            "required_context_bytes":"PRIVATE_BYTES", "available_context_bytes":1.5,
+            "session_id":"PRIVATE_SESSION", "prompt":"PRIVATE_CONTENT", "provider_error":"PRIVATE_ERROR",
+            "input_states":{"received":"PRIVATE_RECEIPT", "submitted":-1,"remoteQueued":false,"incorporated":2.5,"notAccepted":null,"unknown":9,"PRIVATE_INPUT_ID":88},
+        })).unwrap();
+        store
+            .event(
+                "PRIVATE_SESSION",
+                None,
+                "PRIVATE_EVENT_KIND",
+                json!({"reason":"PRIVATE_BODY"}),
+            )
+            .unwrap();
+        let report = inspect(&store).unwrap();
+        assert!(!report.to_string().contains("PRIVATE"));
+        assert_eq!(report["counts"]["context.rejected"], 1);
+        let summary = &report["latest_capacity"];
+        assert_eq!(summary["event"], "context.rejected");
+        assert_eq!(summary["outcome"], "rejected");
+        assert_eq!(summary["reason"], "unknown");
+        assert_eq!(summary["capacity_boundary"], "unknown");
+        assert_eq!(summary["yield_blocker"], "unknown");
+        assert!(summary["full_history_preserved"].is_null());
+        assert_eq!(summary["input_states"], json!({"unknown":9}));
+        for key in [
+            "model_calls",
+            "tool_calls",
+            "required_context_bytes",
+            "available_context_bytes",
+        ] {
+            assert!(summary.get(key).is_none());
+        }
+    }
+
+    #[test]
+    fn capacity_summary_only_reports_the_negotiated_blocker_vocabulary() {
+        for blocker in [
+            "compaction_disabled",
+            "initial_request",
+            "no_tool_iteration",
+            "tool_outcome_uncertain",
+            "provider_continuation",
+            "provider_boundary_unsettled",
+            "provider_boundary_error",
+            "pending_input_unsettled",
+            "cancelled",
+        ] {
+            let summary = capacity_summary(
+                "context.rejected",
+                "fixture time",
+                &json!({"yield_blocker":blocker}),
+            );
+            assert_eq!(summary["yield_blocker"], blocker);
+        }
+        for blocker in [
+            json!("future-private-detail"),
+            json!(true),
+            json!({"reason":"private"}),
+        ] {
+            let summary = capacity_summary(
+                "context.rejected",
+                "fixture time",
+                &json!({"yield_blocker":blocker}),
+            );
+            assert_eq!(summary["yield_blocker"], "unknown");
+        }
+        // Absence in older events is unknown, never a claim that yielding was safe.
+        assert_eq!(
+            capacity_summary("context.limit", "fixture time", &json!({}))["yield_blocker"],
+            "unknown"
+        );
     }
 }
