@@ -6,14 +6,21 @@ normal and delayed imports both matter. OS DLLs remain valid dependencies.
 import hashlib
 import struct
 
-def inspect_pe(data, architecture):
+DEFAULT_PE_BYTES = 80 * 1024 * 1024
+MAX_PE_BYTES = 256 * 1024 * 1024
+
+def inspect_pe(data, architecture, *, max_bytes=DEFAULT_PE_BYTES):
     """Read ordinary and delay-load import tables without executing the PE file."""
     def unpack(fmt, offset):
         if offset < 0 or offset + struct.calcsize(fmt) > len(data):
             raise ValueError("Truncated PE metadata")
         return struct.unpack_from(fmt, data, offset)
 
-    if len(data) > 80 * 1024 * 1024 or data[:2] != b"MZ":
+    # Fixed package owners may inspect a larger hash-verified dependency (for
+    # example Node). This changes only the input budget, never PE/import checks.
+    if type(max_bytes) is not int or not 0 < max_bytes <= MAX_PE_BYTES:
+        raise ValueError("Invalid bounded PE inspection budget")
+    if len(data) > max_bytes or data[:2] != b"MZ":
         raise ValueError("Expected a bounded Windows executable")
     pe = unpack("<I", 0x3C)[0]
     if data[pe:pe + 4] != b"PE\0\0":
@@ -91,12 +98,12 @@ def inspect_pe(data, architecture):
 
 
 
-def inspect(data, platform):
+def inspect(data, platform, *, max_pe_bytes=DEFAULT_PE_BYTES):
     family, architecture = platform.split("-", 1)
     if architecture not in ("x86_64", "aarch64"):
         raise ValueError("Unsupported architecture")
     if family == "windows":
-        result = inspect_pe(data, architecture)
+        result = inspect_pe(data, architecture, max_bytes=max_pe_bytes)
         if not result["standalone_vc_runtime"]:
             raise ValueError("Executable requires an external Visual C++ runtime: " + ", ".join(result["external_vc_runtime"]))
         return result
