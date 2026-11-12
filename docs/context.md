@@ -14,8 +14,20 @@ Extractive compaction keeps the current controlling prompt and its complete
 tool continuation together. Conversation updates received during that prompt
 are additional input, not completed-turn boundaries. Older history can still
 be compacted, and the original transcript remains available through
-`session_history`. If the active continuation itself cannot fit, the runtime
-reports the capacity failure instead of silently removing its observations.
+`session_history`. If the active continuation itself cannot fit after a completed
+model/tool iteration, Runtime can end that turn with `budget_exhausted` and
+`_meta["io.github.bkrabach.agent-runtime"].stopCause` equal to
+`active_turn_context_capacity`. It uses its existing ACP `max_turn_requests`
+compatibility mapping; this is a local byte limit, not a provider rejection,
+model-request count, or completed task. The host may then authorize a fresh prompt
+in the same session, where the previous completed continuation can be archived.
+Runtime neither retries that prompt nor replays its tools.
+
+This outcome requires settled provider/tool transport and an atomic input-close
+boundary. Unincorporated input, uncertain tool errors, oversized initial inputs,
+disabled compaction and native compaction/provider failures retain their error
+handling. Cancellation still wins. The context limit and saved observations are
+unchanged; no work authority or permission to retry uncertain effects is granted.
 
 The saved transcript stays intact. Model requests use a separate working window.
 For recorded MCP calls, that window omits a text fallback only when its entire
@@ -98,8 +110,13 @@ uses its automatic prefix cache. Credential values are never part of diagnostics
 
 `agent-runtime --home /absolute/engine diagnostics` returns content-free counts,
 model-step latency, latest working-context size, cache usage and explicit stop
-reasons. Original transcript bytes and model-window bytes are separate. Counts
-cover the stated stored-event sample; engine model steps, provider-created
+reasons. Original transcript bytes and model-window bytes are separate.
+`model_context_bytes` retains its serialized-JSON measurement;
+`counted_model_context_bytes` records the distinct byte-budget measurement,
+excluding duplicated ACP prompt metadata and applying the configured media
+accounting. A local capacity stop records a content-free `context.limit` event
+with its required and available context bytes. These byte counts are not token
+estimates. Counts cover the stated stored-event sample; engine model steps, provider-created
 responses and usage notifications are different measurements. Missing usage is
 not zero cost. Compaction usage is separately recorded in `context.compacted`.
 No monetary savings are inferred from cache tokens or reduced input bytes.

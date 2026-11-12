@@ -1,6 +1,6 @@
 use agent_runtime::{
     config::{Config, Mode, ProviderKind},
-    context::{Policy, history, prepare},
+    context::{ActiveTurnCapacity, Policy, history, prepare},
     management,
     store::Store,
 };
@@ -169,8 +169,55 @@ fn awareness_cannot_hide_an_oversized_active_tool_result() {
         json!({"role":"user","content":"An update during the same turn"}),
     ];
     let original = items.clone();
-    assert!(prepare(&items, &Policy::default(), 4096, 2).is_err());
+    let error = prepare(&items, &Policy::default(), 4096, 2)
+        .err()
+        .expect("The active observation cannot be discarded");
+    let limit = error.downcast_ref::<ActiveTurnCapacity>().unwrap();
+    assert_eq!(limit.available_bytes, 4096);
+    assert!(limit.required_bytes > limit.available_bytes);
     assert_eq!(items, original);
+}
+
+#[test]
+fn first_turn_continuation_capacity_is_typed_without_rewriting_history() {
+    let mut items = vec![
+        json!({"role":"user","content":"Inspect the requested work."}),
+        json!({"type":"function_call","call_id":"one","name":"inspect","arguments":"{}"}),
+        json!({"type":"function_call_output","call_id":"one","output":"Observed detail ".repeat(1000)}),
+    ];
+    let original = items.clone();
+    let error = prepare(&items, &Policy::default(), 4096, 0).err().unwrap();
+    assert!(error.is::<ActiveTurnCapacity>());
+    assert_eq!(items, original);
+
+    // A distinct, authorized next controlling prompt can archive the completed
+    // turn; it does not remove history or repeat the old tool.
+    items.push(json!({"role":"user","content":"Report the inspected result."}));
+    let view = prepare(&items, &Policy::default(), 4096, 3).unwrap();
+    assert_eq!(&items[..3], original);
+    assert_eq!(view.items.last(), items.last());
+    assert_eq!(view.checkpoint.unwrap()["prefix_items"], 3);
+}
+
+#[test]
+fn disabled_compaction_and_invalid_boundary_are_not_active_capacity() {
+    let items = vec![json!({"role":"user","content":"detail ".repeat(1000)})];
+    let disabled = Policy {
+        auto_compact: false,
+        ..Policy::default()
+    };
+    assert!(
+        !prepare(&items, &disabled, 4096, 0)
+            .err()
+            .unwrap()
+            .is::<ActiveTurnCapacity>()
+    );
+    assert!(
+        !prepare(&items, &Policy::default(), 4096, 1)
+            .err()
+            .unwrap()
+            .is::<ActiveTurnCapacity>()
+    );
 }
 
 #[test]

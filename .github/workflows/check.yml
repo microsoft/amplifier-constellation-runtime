@@ -90,6 +90,7 @@ jobs:
         if: runner.os == 'Linux'
       - run: python tests/steering.py
       - run: python tests/native_context.py
+      - run: python tests/context_capacity.py
       - run: python tests/steering_fallback.py
       - run: python tests/steering_pause.py
       - run: python tests/protocol.py

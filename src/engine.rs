@@ -95,19 +95,28 @@ impl Turn<'_> {
                 tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
             }
         };
-        let result = tokio::select! {
+        let mut result = tokio::select! {
             biased;
             _=token.cancelled()=>Ok("cancelled"),
             _=deadline=>{token.cancel();Ok("turn_deadline")},
             r=self.execute(&turn, active_turn_start)=>r,
         };
+        let capacity_stop = matches!(result, Ok("active_turn_context_capacity"));
         for report in self.mcp.cancel_pending().await {
+            if capacity_stop && report.outcome_uncertain {
+                result = Err(anyhow::anyhow!(
+                    "Context capacity reached with an uncertain tool outcome; inspect retained receipts before continuing"
+                ));
+            }
             self.store.event(
                 &self.session.id,
                 Some(&turn),
                 "tool.cancellation",
                 serde_json::to_value(report)?,
             )?;
+        }
+        if capacity_stop && self.cancel.is_cancelled() {
+            result = Ok("cancelled");
         }
         recover_pending_tools(&mut self.session.items);
         self.store.save(&self.session)?;
@@ -133,7 +142,7 @@ impl Turn<'_> {
         Ok(
             // ACP has a shared request-limit stop reason; the exact cause is
             // carried separately rather than introducing an invalid ACP enum.
-            json!({"stopReason":match result? {"turn_deadline"|"tool_call_budget"=>"max_turn_requests",other=>other},"_meta":{"io.github.bkrabach.agent-runtime":{"turnId":turn,"state":state,"stopCause":reason,"elapsedMs":started.elapsed().as_millis(),"inputReceipts":self.inbox.summary()?}}}),
+            json!({"stopReason":match result? {"turn_deadline"|"tool_call_budget"|"active_turn_context_capacity"=>"max_turn_requests",other=>other},"_meta":{"io.github.bkrabach.agent-runtime":{"turnId":turn,"state":state,"stopCause":reason,"elapsedMs":started.elapsed().as_millis(),"inputReceipts":self.inbox.summary()?}}}),
         )
     }
     async fn execute(&mut self, turn: &str, active_turn_start: usize) -> Result<&'static str> {
@@ -216,6 +225,9 @@ impl Turn<'_> {
             self.session.mode.id(),
         );
         let mut tool_count = 0;
+        // A recorded failed tool status may hide a transport or execution error.
+        // Do not turn that uncertainty into a resumable local-capacity result.
+        let mut tool_results_known = true;
         let mut used_calls = HashSet::new();
         let mut provider_continuation_only = false;
         let mut continuation_start = self.session.items.len();
@@ -234,7 +246,7 @@ impl Turn<'_> {
                 fixed_bytes < self.config.limits.max_context_bytes,
                 "Instructions and tool definitions exceed the context budget"
             );
-            let mut view = provider
+            let prepared = provider
                 .prepare_context(
                     &self.session.items,
                     &instructions,
@@ -243,7 +255,33 @@ impl Turn<'_> {
                     self.peer,
                     &self.cancel,
                 )
-                .await?;
+                .await;
+            let mut view = match prepared {
+                Ok(view) => view,
+                Err(error) => {
+                    if let Some(capacity) =
+                        error.downcast_ref::<crate::context::ActiveTurnCapacity>()
+                        && call_index > 0
+                        && tool_count > 0
+                        && tool_results_known
+                        && !provider_continuation_only
+                        && provider.claim_context_boundary().await?
+                        && self.inbox.try_close()?
+                    {
+                        if self.cancel.is_cancelled() {
+                            return Ok("cancelled");
+                        }
+                        self.store.event(
+                            &self.session.id,
+                            Some(turn),
+                            "context.limit",
+                            json!({"reason":"active_turn_context_capacity","model_calls":call_index,"tool_calls":tool_count,"available_context_bytes":capacity.available_bytes,"required_context_bytes":capacity.required_bytes,"full_history_preserved":true}),
+                        )?;
+                        return Ok("active_turn_context_capacity");
+                    }
+                    return Err(error);
+                }
+            };
             view.items
                 .extend(provider.boundary_inputs.iter().map(|p| p.item.clone()));
             ensure!(
@@ -270,7 +308,7 @@ impl Turn<'_> {
                 &self.session.id,
                 Some(turn),
                 "model.started",
-                json!({"index":call_index+1,"history_items":self.session.items.len(),"history_bytes":serde_json::to_vec(&self.session.items)?.len(),"model_items":view.items.len(),"model_context_bytes":serde_json::to_vec(&view.items)?.len(),"instructions_bytes":instructions.len(),"tool_definitions_bytes":serde_json::to_vec(&definitions)?.len(),"tool_definitions":definitions.len(),"context_limit_bytes":self.config.limits.max_context_bytes}),
+                json!({"index":call_index+1,"history_items":self.session.items.len(),"history_bytes":serde_json::to_vec(&self.session.items)?.len(),"model_items":view.items.len(),"model_context_bytes":serde_json::to_vec(&view.items)?.len(),"counted_model_context_bytes":crate::media::context_bytes(&view.items)?,"instructions_bytes":instructions.len(),"tool_definitions_bytes":serde_json::to_vec(&definitions)?.len(),"tool_definitions":definitions.len(),"context_limit_bytes":self.config.limits.max_context_bytes}),
             )?;
             let model_started = std::time::Instant::now();
             provider.continuation_items = self.session.items[continuation_start..].to_vec();
@@ -665,6 +703,7 @@ impl Turn<'_> {
                         tools::call(self.config, &self.session.cwd, name, &args).await
                     }
                 };
+                tool_results_known &= result.is_ok();
                 let success = result
                     .as_ref()
                     .is_ok_and(|v| v["isError"] != true && v.get("success") != Some(&json!(false)));

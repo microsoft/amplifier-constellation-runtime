@@ -46,7 +46,7 @@ dependencies = [
 
 [[package]]
 name = "agent-runtime"
-version = "0.15.4"
+version = "0.15.5"
 dependencies = [
  "amplifier-acp-connection",
  "anyhow",

@@ -58,6 +58,22 @@ pub struct View {
     pub items: Vec<Value>,
     pub checkpoint: Option<Value>,
 }
+
+/// The current controlling prompt and continuation do not fit after every
+/// permitted completed-turn cut. This is local byte accounting, not a provider
+/// rejection or permission to replay work. The engine decides whether a settled
+/// turn can yield; an oversized first request remains an error.
+#[derive(Debug)]
+pub struct ActiveTurnCapacity {
+    pub available_bytes: usize,
+    pub required_bytes: usize,
+}
+impl std::fmt::Display for ActiveTurnCapacity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("The current turn and its tool continuation exceed the context budget even after compacting completed turns. Increase the limit or split the work; no saved history was removed.")
+    }
+}
+impl std::error::Error for ActiveTurnCapacity {}
 fn excerpt(text: &str, max: usize) -> String {
     let mut end = max.min(text.len());
     while !text.is_char_boundary(end) {
@@ -232,14 +248,23 @@ pub fn prepare(
         .filter(|(i, v)| *i <= active_turn_start && v["role"] == "user")
         .map(|(i, _)| i)
         .collect();
-    ensure!(
-        starts.len() >= 2,
-        "The current turn exceeds its context budget. Shorten this task or increase the configured limit; saved history is preserved."
-    );
+    if starts.len() < 2 {
+        if original_bytes > budget {
+            return Err(ActiveTurnCapacity {
+                available_bytes: budget,
+                required_bytes: original_bytes,
+            }
+            .into());
+        }
+        anyhow::bail!(
+            "The current turn exceeds its request byte limit; saved history is preserved."
+        );
+    }
     let preferred = starts
         .len()
         .saturating_sub(policy.retain_recent_turns + 1)
         .max(1);
+    let mut required_bytes = original_bytes;
     for &end in starts.iter().skip(preferred) {
         let digest = format!(
             "{:x}",
@@ -254,6 +279,7 @@ pub fn prepare(
         let mut view = vec![json!({"role":"user","content":[{"type":"input_text","text":text}]})];
         view.extend_from_slice(&items[end..]);
         let compacted_bytes = crate::media::context_bytes(&view)?;
+        required_bytes = compacted_bytes;
         if compacted_bytes <= budget && crate::media::request_fits(&view)? {
             return Ok(View {
                 items: view,
@@ -263,9 +289,14 @@ pub fn prepare(
             });
         }
     }
-    anyhow::bail!(
-        "The current turn and its tool continuation exceed the context budget even after compacting completed turns. Increase the limit or split the work; no saved history was removed."
-    )
+    if required_bytes > budget {
+        return Err(ActiveTurnCapacity {
+            available_bytes: budget,
+            required_bytes,
+        }
+        .into());
+    }
+    anyhow::bail!("The current turn exceeds its request byte limit; saved history is preserved.")
 }
 
 /// Optional ACP content-block extension. A producer declares a refreshed view
