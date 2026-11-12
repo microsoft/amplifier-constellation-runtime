@@ -173,6 +173,29 @@ impl Inbox {
         *open = false;
         Ok(true)
     }
+    /// End local input ownership at an already claimed provider capacity boundary.
+    /// Submitted or unrecorded incorporation remains uncertain and prevents this
+    /// close. Locally received inputs retain their original records without replay.
+    pub fn try_close_at_capacity(&self, reason: &str) -> Result<bool> {
+        let mut open = self.gate.lock().unwrap();
+        let mut db = self.store.db()?;
+        let tx = db.transaction()?;
+        let uncertain: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM turn_inputs WHERE turn=?1 AND (state IN ('submitted','remoteQueued') OR (state='incorporated' AND recorded=0)))",
+            [&self.turn],
+            |row| row.get(0),
+        )?;
+        if uncertain {
+            return Ok(false);
+        }
+        tx.execute(
+            "UPDATE turn_inputs SET state='notAccepted',reason=?1 WHERE turn=?2 AND state='received'",
+            params![reason, self.turn],
+        )?;
+        tx.commit()?;
+        *open = false;
+        Ok(true)
+    }
     pub fn close(&self, reason: &str) -> Result<()> {
         let mut open = self.gate.lock().unwrap();
         *open = false;
@@ -194,6 +217,233 @@ impl Inbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
+
+    fn retained_columns(inbox: &Inbox) -> Vec<Vec<rusqlite::types::Value>> {
+        let db = inbox.store.db().unwrap();
+        let mut query = db
+            .prepare("SELECT sequence,session,turn,input_id,item,recorded,remote_parent,remote_id,successor,reconciled FROM turn_inputs WHERE turn=?1 ORDER BY sequence")
+            .unwrap();
+        query
+            .query_map([&inbox.turn], |row| {
+                (0..row.as_ref().column_count())
+                    .map(|column| row.get(column))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn capacity_close_preserves_all_inputs_beyond_one_batch_and_original_deduplication() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path().into()).unwrap();
+        let mut session = store
+            .create(directory.path().into(), crate::config::Mode::ReadOnly)
+            .unwrap();
+        let inbox = Inbox::new(store.clone(), &session.id).unwrap();
+        inbox
+            .admit(
+                "already-recorded",
+                json!({"role":"user","content":"prior input"}),
+            )
+            .unwrap();
+        let recorded = inbox.queued().unwrap();
+        inbox
+            .remote(
+                &recorded,
+                "original-parent",
+                Some("original-steer"),
+                Some("original-successor"),
+            )
+            .unwrap();
+        session.items.push(recorded[0].item.clone());
+        inbox.save_inputs(&session, &recorded).unwrap();
+
+        let mut originals = Vec::new();
+        for index in 0..40 {
+            let id = format!("original-{index}");
+            let item = json!({"role":"user","content":format!("correction {index}"),
+                "_acp_prompt":[{"type":"text","text":format!("source {index}"),
+                    "_meta":{"sourceId":id,"audience":"original conversation"}}]});
+            let receipt = inbox.admit(&id, item.clone()).unwrap();
+            originals.push((id, item, receipt["_meta"]["steering"]["sequence"].clone()));
+        }
+        assert_eq!(inbox.queued().unwrap().len(), 16);
+        let retained = retained_columns(&inbox);
+        assert!(
+            inbox
+                .try_close_at_capacity("active_turn_context_capacity")
+                .unwrap()
+        );
+        assert_eq!(retained_columns(&inbox), retained);
+        assert!(inbox.queued().unwrap().is_empty());
+        assert_eq!(store.load(&session.id).unwrap().items, session.items);
+        let summary = inbox.summary().unwrap();
+        assert_eq!(summary[0]["state"], "incorporated");
+        assert!(summary[0]["reason"].is_null());
+        assert_eq!(summary.as_array().unwrap().len(), 41);
+        assert!(summary.as_array().unwrap()[1..].iter().all(|receipt| {
+            receipt["state"] == "notAccepted" && receipt["reason"] == "active_turn_context_capacity"
+        }));
+        assert!(
+            inbox
+                .try_close_at_capacity("must_not_replace_prior_reason")
+                .unwrap()
+        );
+        assert_eq!(inbox.summary().unwrap(), summary);
+        let receipts = store.input_receipts(&session.id).unwrap();
+        let original_turn = inbox.turn.clone();
+        drop(inbox);
+        drop(store);
+
+        let reopened = Store::open(directory.path().into()).unwrap();
+        assert_eq!(reopened.input_receipts(&session.id).unwrap(), receipts);
+        assert_eq!(reopened.load(&session.id).unwrap().items, session.items);
+        let next = Inbox::new(reopened, &session.id).unwrap();
+        for (id, item, sequence) in originals {
+            let duplicate = next.admit(&id, item).unwrap();
+            let receipt = &duplicate["_meta"]["steering"];
+            assert_eq!(receipt["duplicate"], true);
+            assert_eq!(receipt["inputId"], id);
+            assert_eq!(receipt["turnId"], original_turn);
+            assert_eq!(receipt["sequence"], sequence);
+            assert_eq!(receipt["state"], "notAccepted");
+            assert!(
+                next.admit(&id, json!({"content":"changed source"}))
+                    .is_err()
+            );
+        }
+        assert!(next.queued().unwrap().is_empty());
+        assert_eq!(next.store.input_receipts(&session.id).unwrap(), receipts);
+    }
+
+    #[test]
+    fn capacity_close_refuses_uncertain_inputs_without_partial_disposition() {
+        for state in ["submitted", "remoteQueued", "incorporated"] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = Store::open(directory.path().into()).unwrap();
+            let inbox = Inbox::new(store, "session").unwrap();
+            inbox
+                .admit("local", json!({"content":"locally received"}))
+                .unwrap();
+            inbox
+                .admit("uncertain", json!({"content":"not safe to replay"}))
+                .unwrap();
+            let inputs = inbox.queued().unwrap();
+            inbox
+                .state(&inputs[1..], state, Some("original-reason"))
+                .unwrap();
+            let summary = inbox.summary().unwrap();
+            let retained = retained_columns(&inbox);
+            assert!(
+                !inbox
+                    .try_close_at_capacity("active_turn_context_capacity")
+                    .unwrap()
+            );
+            assert_eq!(inbox.summary().unwrap(), summary, "state: {state}");
+            assert_eq!(retained_columns(&inbox), retained, "state: {state}");
+            assert_eq!(
+                inbox
+                    .admit("still-open", json!({"content":"later"}))
+                    .unwrap()["outcome"],
+                "injected"
+            );
+        }
+    }
+
+    #[test]
+    fn capacity_close_storage_failure_rolls_back_and_leaves_admission_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path().into()).unwrap();
+        let inbox = Inbox::new(store, "session").unwrap();
+        for id in ["first", "second"] {
+            inbox.admit(id, json!({"content":id})).unwrap();
+        }
+        inbox.store.db().unwrap().execute_batch(
+            "CREATE TRIGGER fail_capacity_disposition BEFORE UPDATE ON turn_inputs WHEN OLD.input_id='second' AND NEW.state='notAccepted' BEGIN SELECT RAISE(ABORT,'fixture storage failure'); END;"
+        ).unwrap();
+        let summary = inbox.summary().unwrap();
+        let retained = retained_columns(&inbox);
+        assert!(
+            inbox
+                .try_close_at_capacity("active_turn_context_capacity")
+                .is_err()
+        );
+        assert_eq!(inbox.summary().unwrap(), summary);
+        assert_eq!(retained_columns(&inbox), retained);
+        assert_eq!(
+            inbox
+                .admit("after-failure", json!({"content":"retained"}))
+                .unwrap()["outcome"],
+            "injected"
+        );
+        inbox
+            .store
+            .db()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_capacity_disposition")
+            .unwrap();
+        assert!(
+            inbox
+                .try_close_at_capacity("active_turn_context_capacity")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn capacity_close_and_admission_race_never_strands_received_input() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path().into()).unwrap();
+        for index in 0..32 {
+            let inbox = Arc::new(Inbox::new(store.clone(), "session").unwrap());
+            let barrier = Arc::new(Barrier::new(3));
+            let id = format!("racing-{index}");
+            let admit = {
+                let inbox = inbox.clone();
+                let barrier = barrier.clone();
+                let id = id.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    inbox.admit(&id, json!({"content":id})).unwrap()
+                })
+            };
+            let close = {
+                let inbox = inbox.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    inbox
+                        .try_close_at_capacity("active_turn_context_capacity")
+                        .unwrap()
+                })
+            };
+            barrier.wait();
+            let admitted = admit.join().unwrap();
+            assert!(close.join().unwrap());
+            let summary = inbox.summary().unwrap();
+            if admitted["outcome"] == "injected" {
+                assert_eq!(summary.as_array().unwrap().len(), 1);
+                assert_eq!(summary[0]["inputId"], id);
+                assert_eq!(summary[0]["state"], "notAccepted");
+                assert_eq!(summary[0]["reason"], "active_turn_context_capacity");
+                assert_eq!(
+                    summary[0]["sequence"],
+                    admitted["_meta"]["steering"]["sequence"]
+                );
+            } else {
+                assert_eq!(admitted["outcome"], "promptRequired");
+                assert!(summary.as_array().unwrap().is_empty());
+            }
+            assert!(inbox.queued().unwrap().is_empty());
+            assert_eq!(
+                inbox.admit("late", json!({"content":"later"})).unwrap()["outcome"],
+                "promptRequired"
+            );
+        }
+    }
+
     #[test]
     fn admission_deduplicates_and_closing_does_not_lose_input() {
         let d = tempfile::tempdir().unwrap();
