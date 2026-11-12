@@ -7,19 +7,64 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, windows-2025]
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x86_64
+            executable: agent-runtime
+            python: '3.12'
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            platform: linux-aarch64
+            executable: agent-runtime
+            python: '3.12'
+          - os: macos-15
+            target: aarch64-apple-darwin
+            platform: macos-aarch64
+            executable: agent-runtime
+            python: '3.12'
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            platform: macos-x86_64
+            executable: agent-runtime
+            python: '3.12'
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            platform: windows-x86_64
+            executable: agent-runtime.exe
+            python: '3.12'
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            platform: windows-aarch64
+            executable: agent-runtime.exe
+            python: '3.13'
     runs-on: ${{ matrix.os }}
+    env:
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
+      AGENT_RUNTIME_TEST_BINARY: ${{ github.workspace }}/target/${{ matrix.target }}/debug/${{ matrix.executable }}
+      RUNTIME_BINARY: ${{ github.workspace }}/target/${{ matrix.target }}/debug/${{ matrix.executable }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: ${{ matrix.target }}
+      - name: Include the Windows C runtime in the executable
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          NATIVE_TARGET: ${{ matrix.target }}
+        run: |
+          target_env="${NATIVE_TARGET//-/_}"
+          echo "CARGO_TARGET_${target_env^^}_RUSTFLAGS=-C target-feature=+crt-static" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: ${{ matrix.python }}
+          architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+      - run: python tests/package_release.py
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo clippy --locked --all-targets --features windows-appcontainer -- -D warnings
@@ -63,12 +108,22 @@ jobs:
       - run: python tests/install.py
         if: runner.os == 'Linux'
       - run: cargo build --release --locked
+      - name: Verify and package the actual native release
+        env:
+          AGENT_RUNTIME_TEST_BINARY: ${{ github.workspace }}/target/${{ matrix.target }}/release/${{ matrix.executable }}
+          RUNTIME_BINARY: ${{ github.workspace }}/target/${{ matrix.target }}/release/${{ matrix.executable }}
+        run: |
+          python tests/helper_bounds.py
+          python tests/protocol.py
+          python tests/provider_identity.py
+          python tests/windows_protocol.py
+          python scripts/package-release.py --binary "${{ github.workspace }}/target/${{ matrix.target }}/release/${{ matrix.executable }}" --platform "${{ matrix.platform }}" --source "${{ github.sha }}" --output dist
       - uses: actions/upload-artifact@v4
         with:
           name: agent-runtime-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
           path: |
-            target/release/agent-runtime
-            target/release/agent-runtime.exe
+            target/${{ matrix.target }}/release/${{ matrix.executable }}
+            dist/*
           if-no-files-found: error
   computer-browser:
     runs-on: ubuntu-24.04

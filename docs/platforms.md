@@ -1,8 +1,30 @@
 # Native installation and execution
 
-The Rust engine builds natively for Linux, macOS, and Windows. The optional `scripts/install-instance.py` installer uses the Agent Instance host's platform installer: a user systemd service on Linux, a launch agent on macOS, and a user scheduled task on Windows. The host is configured before its service starts. `--no-start` leaves the installation stopped for inspection. Each installation pins its own version-and-hash engine binary and keeps its own workspace, configuration, credentials, and history.
+## Native executable packages
 
-Build both repositories on the target OS, then invoke the same Python installer shown in the README. Use `python` on Windows and supply `.exe` paths for both binaries. Rust/Cargo, a C compiler/toolchain for the chosen target, Python 3, and the host repository's documented prerequisites must already be installed. This developer installer does not install global build tools or claim to be a signed end-user package. Windows user-task registration and macOS LaunchAgent registration are provided by the host's native installer; their creation is deferred until the engine configuration is valid.
+CI builds and runs the native checks on Linux x64/ARM64, Intel/Apple-silicon Mac,
+Windows x64 and Windows 11 ARM64. Windows x64 CI uses Windows Server 2025;
+that is not a Windows 11 desktop installation test. Published release assets,
+their checksums and `PACKAGE.json` identify the actual available binary, source,
+architecture and version. Windows packages include the C runtime; Mac binaries
+record their deployment target. Linux packages currently target the Ubuntu 24.04
+build environment. Packages are not signed or notarized, and CI does not establish
+consumer first-launch behavior on every OS version.
+
+Use a verified executable directly with an ACP client or through the independently
+packaged Instance. Runtime does not need a compiler or another language runtime
+for its own model/tool loop. Optional provider bridges and tool programs retain
+their documented dependencies; installation owners must provide them deliberately.
+The umbrella owns the [native setup commitment](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/installations.md#native-single-computer-setup).
+
+The optional `scripts/install-instance.py` remains a developer assembly tool,
+requiring Python and the Instance source setup machinery. It is not the consumer
+installer. It creates a new, independent installation and registers the host's
+user systemd service, LaunchAgent or Windows scheduled task only after engine
+configuration is valid; `--no-start` leaves it stopped. It does not migrate or
+replace an existing agent.
+
+## Tool isolation
 
 Workspace file tools and explicitly connected MCP tools are available on all three platforms. Local command execution is a distinct capability:
 
