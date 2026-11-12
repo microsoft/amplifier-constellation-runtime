@@ -14,7 +14,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
-from native_binary import inspect
+from native_binary import inspect, DEFAULT_PE_BYTES, MAX_PE_BYTES
 
 spec = importlib.util.spec_from_file_location("pack", ROOT / "scripts/package-release.py")
 pack = importlib.util.module_from_spec(spec)
@@ -80,6 +80,23 @@ class Packages(unittest.TestCase):
         for platform, data in (("windows-x86_64", pe()[:200]), ("macos-x86_64", macho()[:45]), ("linux-x86_64", elf()[:20])):
             with self.subTest(platform=platform), self.assertRaises(ValueError):
                 inspect(data, platform)
+
+    def test_large_dependency_needs_explicit_bounded_budget_without_import_bypass(self):
+        data = pe()
+        data.extend(bytes(DEFAULT_PE_BYTES + 1 - len(data)))
+        with self.assertRaisesRegex(ValueError, "bounded Windows"):
+            inspect(data, "windows-x86_64")
+        self.assertTrue(inspect(data, "windows-x86_64", max_pe_bytes=MAX_PE_BYTES)["standalone_vc_runtime"])
+        # The larger budget neither changes architecture nor permits VC imports.
+        with self.assertRaisesRegex(ValueError, "architecture"):
+            inspect(data, "windows-aarch64", max_pe_bytes=MAX_PE_BYTES)
+        bad = pe(imported="VCRUNTIME140.dll", delayed=True)
+        data[:len(bad)] = bad
+        with self.assertRaisesRegex(ValueError, "external Visual C"):
+            inspect(data, "windows-x86_64", max_pe_bytes=MAX_PE_BYTES)
+        for invalid in (None, True, -1, 0, MAX_PE_BYTES + 1):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "budget"):
+                inspect(data, "windows-x86_64", max_pe_bytes=invalid)
 
     def test_platform_archive_layout_checksum_and_repeatability(self):
         version = pack.tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
