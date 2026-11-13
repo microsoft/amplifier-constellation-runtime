@@ -7,7 +7,11 @@ providers directly; another agent framework is not required.
 
 Runtime contributes to the [Constellation vision](https://github.com/microsoft/amplifier-constellation/blob/main/docs/VISION.md).
 The umbrella owns [shared promises](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/README.md);
-this repository owns the native execution boundary and technical interfaces.
+this repository owns the native execution implementation and technical interfaces.
+Runtime can supply execution behind an [Agent Instance](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/agent-instance.md);
+its independently usable helpers offer [Tool](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/tool.md)
+capabilities. The five primitives describe outward roles, not a requirement that
+every agent contain this engine or use its internal design.
 
 ## Find the right starting point
 
@@ -19,7 +23,7 @@ this repository owns the native execution boundary and technical interfaces.
 | [Provider setup](docs/providers.md) and [configuration](docs/configuration.md) | Connect a model, inspect configuration and make a supported change. |
 | [Validation](docs/validation.md) | Check the relevant source, protocol, provider and platform behavior. |
 
-## Start one agent
+## Run the engine with an ACP client
 
 Download an archive for your computer from
 [Releases](https://github.com/microsoft/amplifier-constellation-runtime/releases),

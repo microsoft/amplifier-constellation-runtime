@@ -12,7 +12,7 @@ locates the authoritative commitments.
 flowchart TB
     E["Conversation experiences<br/>Slack · Teams · browser · editor · game"]
     A["Experience adapter / ACP client<br/>Messages, threads, attachments, presentation"]
-    I["Agent Instance — optional host<br/>Identity, setup, authorized context, attention, work"]
+    I["Constellation Instance — optional host implementation<br/>Identity, setup, authorized context, attention, work"]
     R["Native Rust Runtime<br/>Prepare context → call model → run tools → repeat"]
     P["Model provider<br/>Reasoning, responses and enabled hosted tools"]
     T["Agent tools<br/>Granted workspace, bounded commands, explicit MCP"]
@@ -30,7 +30,10 @@ A compatible client can use the engine directly. An optional Instance host can
 supply installed identity, management and authorized context. The umbrella
 [family agreement](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/composition.md)
 defines these service responsibilities and information ownership; this diagram
-illustrates one composition rather than requiring the whole stack.
+illustrates this selected-engine composition rather than requiring the whole stack.
+The broader [Agent Instance boundary](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/agent-instance.md)
+allows other internal architectures. Source Conversations and engine execution
+sessions remain distinct even when a connector maps between them.
 
 ## Follow one interaction
 

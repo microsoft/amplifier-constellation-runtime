@@ -1,8 +1,10 @@
 # The native execution boundary
 
 For ACP clients, hosts, tools and provider integrations using Constellation Runtime.
-The promise: a standalone engine carries supported interactions through its own
-model/tool loop and retains inspectable execution evidence.
+The promise: this standalone engine carries supported interactions through its
+model/tool loop and retains inspectable execution evidence. It can supply the
+execution inside an [Agent Instance](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/agent-instance.md);
+the agent's outward boundary does not prescribe this loop or session layout.
 
 **Example:** A client loads an existing session, adds a correction and receives
 ordered response and tool events. A tool outcome retained before a disconnect
@@ -37,13 +39,12 @@ remains available on reload; replay displays the record rather than executing it
    used without replacing an installation's chosen engine. Their advice does not
    create a second owner of domain execution.
 
-The umbrella owns [composition](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/composition.md),
-[interaction](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/interaction.md),
-[work authority](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/work-authority.md),
-[continuity](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/work-continuity.md),
-[installations](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/installations.md)
-and [engine compatibility](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/engine-compatibility.md).
-The native implementation applies those promises; it does not define alternatives.
+The umbrella's [contract map](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/README.md)
+owns shared behavior, including the [Tool boundary](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/tool.md)
+for independent helpers. Its [engine compatibility](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/engine-compatibility.md)
+and applicable [ACP hosting profile](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/profiles/acp-hosting.md)
+remain authoritative for protocol, model and hosted-session commitments. This
+agreement defines the native implementation's local responsibilities.
 
 **Check:** Run an actual ACP client through session load, model/tool execution,
 correction and disconnect. Inspect retained history and actual tool effects.

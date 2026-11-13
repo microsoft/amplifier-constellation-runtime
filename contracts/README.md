@@ -6,6 +6,12 @@ Start with the [vision](../docs/VISION.md) and local
 including SDK use, model choice, continuity and work authority. This repository
 owns the native implementation and its precise interfaces.
 
+Runtime can supply execution within an [Agent Instance](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/agent-instance.md),
+while its standalone helpers expose [Tool](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/tool.md)
+capabilities. Neither makes its model loop or session layout mandatory for other
+agents. The [ACP hosting profile](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/profiles/acp-hosting.md)
+applies when it participates in the supplied selected-engine host arrangement.
+
 ## Technical interfaces
 
 | Boundary | Definition |
