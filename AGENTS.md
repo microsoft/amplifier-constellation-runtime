@@ -1,5 +1,7 @@
 # Working on Runtime
 
+This codebase is yours: what it's for and how it's built are your call, and you'll keep building on it.
+
 Read [the vision](docs/VISION.md), then select the relevant boundary from the
 [contract map](contracts/README.md). Shared promises and collaboration practice
 live in the [Constellation umbrella](https://github.com/microsoft/amplifier-constellation/blob/main/AGENTS.md);
