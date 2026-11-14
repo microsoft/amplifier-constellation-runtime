@@ -94,6 +94,7 @@ jobs:
       - run: python tests/steering_fallback.py
       - run: python tests/steering_pause.py
       - run: python tests/protocol.py
+      - run: python tests/mcp_tls.py
       - run: python tests/images.py
       - run: python tests/providers.py
       - run: python tests/provider_identity.py
@@ -116,6 +117,7 @@ jobs:
         run: |
           python tests/helper_bounds.py
           python tests/protocol.py
+          python tests/mcp_tls.py
           python tests/provider_identity.py
           python tests/windows_protocol.py
           python scripts/package-release.py --binary "${{ github.workspace }}/target/${{ matrix.target }}/release/${{ matrix.executable }}" --platform "${{ matrix.platform }}" --source "${{ github.sha }}" --output dist

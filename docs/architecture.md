@@ -67,6 +67,14 @@ not the model key. HTTP credentials attach only to the specified server;
 redirects are disabled. The runtime does not implement sampling or arbitrary
 client callbacks.
 
+For HTTPS MCP, the installation owner can set `SSL_CERT_FILE` in the runtime
+process environment to a PEM certificate bundle. Its certificates supplement the
+public roots for this process's HTTPS MCP connections; hostname verification
+still applies. An unreadable, invalid or empty bundle refuses the connection.
+This does not change OS trust or grant tool permission. Endpoint credentials and
+the exact endpoint permission rules below still apply. Model-route trust remains
+separate in `provider.tls_ca_file`; it is not reused for MCP.
+
 Client-supplied local MCP programs are disabled by default. For a trusted local
 ACP host, launch `agent-runtime --home /absolute/instance acp --trusted-local-client`.
 This enables standard stdio MCP for that process without changing saved settings.

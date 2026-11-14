@@ -394,11 +394,25 @@ impl Transport {
                     );
                 }
             }
-            let client = reqwest::Client::builder()
+            let mut builder = reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(120))
-                .connect_timeout(Duration::from_secs(10))
-                .build()?;
+                .connect_timeout(Duration::from_secs(10));
+            if parsed.scheme() == "https"
+                && let Some(path) = std::env::var_os("SSL_CERT_FILE")
+            {
+                let pem = std::fs::read(path).context("Read SSL_CERT_FILE for HTTPS MCP")?;
+                let certificates = reqwest::Certificate::from_pem_bundle(&pem)
+                    .context("Parse SSL_CERT_FILE for HTTPS MCP")?;
+                ensure!(
+                    !certificates.is_empty(),
+                    "SSL_CERT_FILE must contain at least one PEM certificate for HTTPS MCP"
+                );
+                for certificate in certificates {
+                    builder = builder.add_root_certificate(certificate);
+                }
+            }
+            let client = builder.build()?;
             Ok(Self::Http {
                 client,
                 url: url.into(),

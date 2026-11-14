@@ -9,6 +9,7 @@ cargo fmt --check
 cargo test --locked
 cargo build --locked
 python3 tests/protocol.py
+python3 tests/mcp_tls.py
 python3 tests/providers.py
 python3 tests/capabilities.py
 python3 tests/management.py
