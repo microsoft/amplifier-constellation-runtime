@@ -1,97 +1,58 @@
 # Constellation Runtime
 
-A reusable reasoning and execution engine for persistent agents. This standalone
-Rust implementation runs its own model/tool loop, preserves execution sessions,
-and connects through Agent Client Protocol (ACP). It calls configured model
-providers directly; another agent framework is not required.
+Constellation Runtime runs an agent's reasoning and tools and preserves its
+execution sessions. It connects to clients through Agent Client Protocol (ACP)
+and calls your configured model providers directly.
 
-Runtime contributes to the [Constellation vision](https://github.com/microsoft/amplifier-constellation/blob/main/docs/VISION.md).
-The umbrella owns [shared promises](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/README.md);
-this repository owns the native execution implementation and technical interfaces.
-Runtime can supply execution behind an [Agent Instance](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/agent-instance.md);
-its independently usable helpers offer [Tool](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/tool.md)
-capabilities. The five primitives describe outward roles, not a requirement that
-every agent contain this engine or use its internal design.
+Use it as a standalone engine for an ACP client, or with
+[Constellation Instance](https://github.com/microsoft/amplifier-constellation-instance)
+for installed identity, remote access, and management. It is part of
+[Amplifier Constellation](https://github.com/microsoft/amplifier-constellation).
 
-## Find the right starting point
+## Get started
 
-| Read | For |
-| --- | --- |
-| [Runtime vision](docs/VISION.md) | Intended value and the contribution this engine makes. |
-| [Contract map](contracts/README.md) | The local interface or behavior your change must preserve. |
-| [How the runtime works](docs/runtime-overview.md) | An illustrative walk through the model/tool loop and saved state. |
-| [Provider setup](docs/providers.md) and [configuration](docs/configuration.md) | Connect a model, inspect configuration and make a supported change. |
-| [Validation](docs/validation.md) | Check the relevant source, protocol, provider and platform behavior. |
-
-## Run the engine with an ACP client
-
-Download an archive for your computer from
+Download the archive for your computer from
 [Releases](https://github.com/microsoft/amplifier-constellation-runtime/releases),
-verify its checksum and unpack it. Running that executable does not require Rust,
-Python, Node, WSL or a separate agent framework. Only the assets present in a
-release are available; [platform setup](docs/platforms.md) describes native
-packaging, tool isolation and optional integration requirements.
+verify its checksum, and extract it. The packaged executable does not require
+Rust, Python, Node, WSL, or another agent framework.
+
+Create an agent home and choose a separate workspace:
 
 ```sh
 ./agent-runtime --home "$PWD/instance" init \
   --workspace "$PWD/workspace" --name "My agent" --model gpt-6.1-sol
 ```
 
-Supply `OPENAI_API_KEY` privately in the process environment. Configuration stores
-its variable name, never the value. The model must be available to that account.
-Configure an ACP client to run:
+For this OpenAI example, supply `OPENAI_API_KEY` privately in the process
+environment and use a model available to your account. Configuration stores the
+variable name, not its value. For another provider or a local model server, follow
+[provider setup](docs/providers.md).
+
+Configure your ACP client to launch:
 
 ```sh
 /absolute/path/to/agent-runtime --home /absolute/path/to/instance acp
 ```
 
-Use the configured workspace as the client's session working folder. On Windows,
-the executable is `agent-runtime.exe`. The private runtime home must not be inside
-the exposed workspace. `check`, `sessions` and `events SESSION_ID` support local
-inspection; configuration is in `runtime.json` under the home.
+Use the configured workspace as the client's session working folder. Keep the
+private agent home outside that workspace. On Windows, use `agent-runtime.exe`.
 
-`agent-runtime providers` lists provider presets. `init` and
-`configure-provider` use the same provider options; see [provider setup](docs/providers.md)
-for endpoint, account and local-server behavior. Per-session model and reasoning
-choices use the [ACP capability contract](docs/acp-optional-capabilities.md#session-model-and-reasoning-choices).
-A supported same-route choice is different from changing provider/account
-boundaries; existing private histories are not silently translated.
+## Configure and inspect
 
-## Compose the capabilities you need
+- [Configuration](docs/configuration.md): inspect and change runtime settings.
+- [Platform setup](docs/platforms.md): supported packages and optional integration requirements.
+- [How Runtime works](docs/runtime-overview.md): the model/tool loop and saved state.
+- [ACP capabilities](docs/acp-optional-capabilities.md): supported client controls.
 
-Clients can use the runtime directly over stdio. The independent
-[Instance](https://github.com/microsoft/amplifier-constellation-instance) service
-can supply installed identity, authenticated remote access and management.
-[Platform setup](docs/platforms.md) covers the optional managed installation.
-Experiences and domain connectors stay independently owned.
+`agent-runtime providers` lists provider presets. The `check`, `sessions`, and
+`events SESSION_ID` commands support local inspection.
 
-The [technical interface map](contracts/README.md#technical-interfaces) locates
-sessions, providers, tools, context, configuration and optional helpers without
-making every capability prerequisite reading. The [execution agreement](contracts/execution.md)
-identifies the native engine's boundary.
+## Develop the engine
 
-## Develop and verify
-
-Use [Converge](https://github.com/microsoft/amplifier-converge) and the
-[execution agreement](contracts/execution.md) to choose and coordinate the next
-useful outcome.
-
-```sh
-cargo fmt --check
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
-cargo build --release --locked
-```
-
-The [validation guide](docs/validation.md) covers additional real ACP subprocess,
-local provider/MCP fixture and platform checks. Source fixtures do not establish
-live provider quality. A turn ending, a tool result and the user's desired outcome
-remain separate observations.
+Start with the [contract map](contracts/README.md) and [validation guide](docs/validation.md).
+The [vision](docs/VISION.md) explains the engine's intended contribution.
 
 ## Contributing
-
-Invited collaborators: follow [Join the work](https://github.com/microsoft/amplifier-constellation#join-the-work)
-within your agreed access and scope. The notice below covers general public intake.
 
 > [!NOTE]
 > This project is not currently accepting external contributions, but we're actively working toward opening this up. We value community input and look forward to collaborating in the future. For now, feel free to fork and experiment!
