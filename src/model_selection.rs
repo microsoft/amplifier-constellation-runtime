@@ -100,7 +100,8 @@ pub fn validate_options(config: &Config, home: &Path) -> Result<()> {
 }
 
 /// Includes account selector, permissions on the route and native configuration,
-/// but not secrets, the selected model or its reasoning control.
+/// but not secrets, the selected model, its reasoning control or the name of
+/// the output-token field.
 pub fn route(config: &Config) -> String {
     fn sorted(value: Value) -> Value {
         match value {
@@ -116,6 +117,11 @@ pub fn route(config: &Config) -> String {
     let mut value = serde_json::to_value(&config.provider).unwrap();
     value.as_object_mut().unwrap().remove("model");
     value.as_object_mut().unwrap().remove("reasoning_effort");
+    // Wire spelling, not a route: correcting it must not orphan saved choices.
+    value
+        .as_object_mut()
+        .unwrap()
+        .remove("token_limit_parameter");
     format!(
         "{:x}",
         Sha256::digest(serde_json::to_vec(&sorted(value)).unwrap())

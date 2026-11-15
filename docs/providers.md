@@ -36,11 +36,12 @@ Choose a model that your account or server actually provides, with tool support 
 --copilot-bridge /absolute/private/provider.py
 --reasoning-effort LEVEL | --thinking-budget-tokens NUMBER
 --api-version VERSION                  (Azure only)
+--token-limit-parameter max_tokens|max_completion_tokens   (chat-completions, litellm)
 --tls-ca-file /absolute/path/to/ca.pem
 --allow-insecure-http                  (explicit private LAN opt-in)
 ```
 
-The JSON configuration uses `provider.kind`, `api_key_env`, `reasoning_effort`, `thinking_budget_tokens`, `api_version`, `tls_ca_file`, `allow_insecure_http`, and `auth` (`api_key` in JSON). The environment variable's name is saved; its value is not. `check` validates local configuration, not account access or model availability.
+The JSON configuration uses `provider.kind`, `api_key_env`, `reasoning_effort`, `thinking_budget_tokens`, `api_version`, `tls_ca_file`, `allow_insecure_http`, `token_limit_parameter`, and `auth` (`api_key` in JSON). The environment variable's name is saved; its value is not. `check` validates local configuration, not account access or model availability.
 
 ## Examples
 
@@ -82,9 +83,13 @@ agent-runtime --home /absolute/path/to/agent configure-provider \
 
 OpenAI defaults to medium reasoning. Other providers send no reasoning override by default. Anthropic `--reasoning-effort` requests adaptive thinking. The current Claude classes reject the older explicit thinking-budget setting during local configuration validation. Gemini receives `thinkingLevel` or `thinkingBudget`; Ollama receives `think`; compatible chat APIs receive `reasoning_effort`. An unsupported model option fails visibly; the runtime does not silently change the model or account.
 
+Compatible chat servers disagree on the name of the output-token limit. `chat-completions` and `litellm` send `limits.max_output_tokens` as `max_tokens` unless the owner sets `token_limit_parameter` to `max_completion_tokens`; OpenAI's Chat Completions endpoint, for example, refuses `max_tokens` for its current models. The runtime does not probe for the name or resend a refused request: a server that refuses the configured name fails with the setting to change. The setting is saved only when it differs from the default, and changing it keeps a session's provider binding and saved model choice.
+
 `--auth auto` uses the native key header for Anthropic, Gemini, and Azure, and bearer authentication for the other HTTP providers when a key is configured. `--auth none` never reads or sends an inherited key. Azure bearer tokens must be obtained and refreshed externally; this implementation does not run Azure CLI, managed identity, or the Azure SDK credential chain. Likewise, it does not perform Google OAuth token refresh.
 
 HTTPS verifies certificates. A custom PEM CA can be added without disabling verification. Loopback HTTP works for local servers; other HTTP destinations require explicit opt-in. Redirects are disabled. There is no automatic provider/account fallback or blind request retry.
+
+A model request refused over HTTP reports its status and, when the provider's structured error supplies them, a reason from the runtime's allowlist and the refused request field in the runtime's own spelling, for example `HTTP 400, unsupported_parameter: max_tokens`. The provider's message and any code, type or parameter the runtime does not recognize are neither shown nor recorded; such a failure keeps the general advice to check credential, endpoint, model and quota.
 
 ## Managed installations
 
