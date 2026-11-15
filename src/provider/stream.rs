@@ -333,10 +333,17 @@ impl Collector {
         let (message, usage) = match self.kind {
             ProviderKind::Anthropic => {
                 for (index, args) in self.arguments {
+                    // A tool called with no arguments streams one empty JSON delta.
+                    // That is a complete, empty input, not a truncated one.
+                    let input = if args.trim().is_empty() {
+                        json!({})
+                    } else {
+                        serde_json::from_str(&args)
+                            .context("Incomplete Anthropic tool arguments")?
+                    };
                     self.blocks
                         .get_mut(&index)
-                        .context("Tool JSON has no block")?["input"] = serde_json::from_str(&args)
-                        .context("Incomplete Anthropic tool arguments")?;
+                        .context("Tool JSON has no block")?["input"] = input;
                 }
                 let blocks: Vec<_> = self.blocks.into_values().collect();
                 for b in &blocks {
@@ -459,5 +466,68 @@ impl Collector {
             result["output"][0]["groundingMetadata"] = self.grounding;
         }
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One Anthropic `tool_use` block whose input arrives as these JSON deltas.
+    fn anthropic_tool_call(partial_json: &[&str]) -> Result<Value> {
+        let mut collector = Collector::new(ProviderKind::Anthropic);
+        collector.event(
+            json!({"type":"message_start","message":{"usage":{"input_tokens":1,"output_tokens":0}}}),
+        )?;
+        collector.event(json!({"type":"content_block_start","index":0,
+            "content_block":{"type":"tool_use","id":"call-1","name":"clock","input":{}}}))?;
+        for part in partial_json {
+            collector.event(json!({"type":"content_block_delta","index":0,
+                "delta":{"type":"input_json_delta","partial_json":part}}))?;
+        }
+        collector.event(json!({"type":"content_block_stop","index":0}))?;
+        collector.event(
+            json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":1}}),
+        )?;
+        collector.event(json!({"type":"message_stop"}))?;
+        collector.finish()
+    }
+
+    #[test]
+    fn anthropic_tool_call_without_arguments_has_an_empty_object_input() {
+        // The wire shape of a zero-argument call is one empty delta; no delta at
+        // all and whitespace-only deltas are the same complete, empty input.
+        for parts in [&[""][..], &[], &["", " \n"]] {
+            let result = anthropic_tool_call(parts).unwrap();
+            assert_eq!(
+                result["output"][0]["message"]["content"][0]["input"],
+                json!({}),
+                "{parts:?}"
+            );
+            assert_eq!(result["output"][1]["type"], "function_call");
+            assert_eq!(result["output"][1]["name"], "clock");
+            assert_eq!(result["output"][1]["arguments"], "{}");
+            assert_eq!(result["status"], "completed");
+        }
+    }
+
+    #[test]
+    fn anthropic_tool_arguments_split_across_deltas_are_joined() {
+        let result = anthropic_tool_call(&["", "{\"a\":", "1}"]).unwrap();
+        assert_eq!(
+            result["output"][0]["message"]["content"][0]["input"],
+            json!({"a":1})
+        );
+    }
+
+    #[test]
+    fn anthropic_truncated_tool_arguments_still_fail() {
+        for parts in [&["{\"a\":"][..], &["", "{"], &["{\"a\":1"]] {
+            let error = anthropic_tool_call(parts).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("Incomplete Anthropic tool arguments"),
+                "{parts:?}: {error:#}"
+            );
+        }
     }
 }

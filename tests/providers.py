@@ -46,8 +46,9 @@ class Handler(ResponsesWebSocketMixin, BaseHTTPRequestHandler):
                            {'type':'content_block_delta','index':0,'delta':{'type':'thinking_delta','thinking':PRIVATE}},
                            {'type':'content_block_delta','index':0,'delta':{'type':'signature_delta','signature':'opaque-signature'}},
                            {'type':'content_block_stop','index':0},
-                           {'type':'content_block_start','index':1,'content_block':{'type':'tool_use','id':'call-1','name':'workspace_write','input':{}}},
-                           {'type':'content_block_delta','index':1,'delta':{'type':'input_json_delta','partial_json':json.dumps(ARGS)}},
+                           {'type':'content_block_start','index':1,'content_block':{'type':'tool_use','id':'call-1','name':'clock' if case.get('no_arguments') else 'workspace_write','input':{}}},
+                           # A call without arguments streams exactly one empty JSON delta.
+                           {'type':'content_block_delta','index':1,'delta':{'type':'input_json_delta','partial_json':'' if case.get('no_arguments') else json.dumps(ARGS)}},
                            {'type':'content_block_stop','index':1}]
             else:events += [{'type':'content_block_start','index':0,'content_block':{'type':'text','text':''}}, {'type':'content_block_delta','index':0,'delta':{'type':'text_delta','text':'Verified café'}},{'type':'content_block_stop','index':0}]
             events += [{'type':'message_delta','delta':{'stop_reason':'max_tokens' if reason else 'tool_use' if tool else 'end_turn'},'usage':{'output_tokens':10}},{'type':'message_stop'}]
@@ -156,6 +157,13 @@ class Tests(unittest.TestCase):
             with self.subTest(kind=kind):
                 self.setup_kind(kind,truncated=True);c=self.client();s=c.call('session/new',{'cwd':str(self.work),'mcpServers':[]})['result']['sessionId']
                 self.assertIn('error',self.prompt(c,s));self.assertFalse((self.work/'provider-proof.txt').exists());self.assertEqual(c.callbacks,[]);self.close(c)
+    def test_anthropic_tool_call_without_arguments_completes_the_turn(self):
+        self.setup_kind('anthropic',no_arguments=True);c=self.client();s=c.call('session/new',{'cwd':str(self.work),'mcpServers':[]})['result']['sessionId']
+        r=self.prompt(c,s,'what time is it');self.assertEqual(r.get('result',{}).get('stopReason'),'end_turn',r)
+        second=self.server.case['requests'][1][1]
+        self.assertEqual(second['messages'][1]['content'][1],{'type':'tool_use','id':'call-1','name':'clock','input':{}})
+        self.assertEqual(second['messages'][2]['content'][0]['tool_use_id'],'call-1')
+        self.assertEqual(len(self.server.case['requests']),2)
     def test_incomplete_response_never_executes_a_tool(self):
         for kind in KINDS:
             with self.subTest(kind=kind):
