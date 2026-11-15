@@ -52,6 +52,27 @@ private agent home outside that workspace. On Windows, use `agent-runtime.exe`.
 Start with the [contract map](contracts/README.md) and [validation guide](docs/validation.md).
 The [vision](docs/VISION.md) explains the engine's intended contribution.
 
+
+<!-- ecosystem-map:start -->
+## Where this fits
+
+A reasoning and tool-execution engine that an Instance or direct ACP client can use.
+
+Supports: Agent Instance, Tool.
+
+![Ecosystem roles and component relationships](docs/ecosystem-map.svg)
+
+[Open the map](docs/ecosystem-map.svg) · [Product overview](https://microsoft.github.io/amplifier-constellation/projects/amplifier-constellation-runtime/) · [Map guide](https://github.com/microsoft/amplifier-constellation/blob/main/docs/ecosystem-maps.md)
+
+<details>
+<summary>The five shared building blocks</summary>
+
+[![Experience, Conversation, Agent Instance, Connection and Tool](https://raw.githubusercontent.com/microsoft/amplifier-constellation/main/site/assets/art/building-blocks.png)](https://microsoft.github.io/amplifier-constellation/)
+
+</details>
+
+<!-- ecosystem-map:end -->
+
 ## Contributing
 
 > [!NOTE]
