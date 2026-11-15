@@ -51,18 +51,25 @@ impl Refusal {
     }
 
     /// The refused request field, only when the provider names a top-level
-    /// field this engine sent. The result is the engine's own spelling of it.
-    fn field<'a>(&self, sent: &'a Value) -> Option<&'a str> {
+    /// field this engine sent or can send for this protocol. A server may
+    /// refuse a default it applied to a field left out. The result is the
+    /// engine's own spelling, never the provider's text.
+    fn field<'a>(&self, kind: ProviderKind, sent: &'a Value) -> Option<&'a str> {
         let named = self.0["error"]["param"].as_str()?;
         let top = named.split(['.', '[']).next()?;
-        let (name, _) = sent.as_object()?.get_key_value(top)?;
-        Some(name)
+        if let Some((name, _)) = sent.as_object().and_then(|o| o.get_key_value(top)) {
+            return Some(name);
+        }
+        super::Provider::request_fields(kind)
+            .iter()
+            .copied()
+            .find(|name| *name == top)
     }
 
     /// The failure shown for a refused model request.
     pub(super) fn describe(&self, p: &Provider, status: u16, sent: &Value) -> String {
         let kind = p.kind.id();
-        let (reason, field) = (self.reason(), self.field(sent));
+        let (reason, field) = (self.reason(), self.field(p.kind, sent));
         if reason.is_none() && field.is_none() {
             return format!(
                 "{kind} request failed (HTTP {status}); check this provider's credential, endpoint, model and quota"
@@ -73,17 +80,26 @@ impl Refusal {
             return format!("{kind} request failed (HTTP {status}, {reason})");
         };
         let mut text = format!("{kind} request failed (HTTP {status}, {reason}: {field})");
-        // The owner corrects the field name; a refused request is never resent.
-        if matches!(
+        // The owner corrects the setting; a refused request is never resent.
+        if !matches!(
             p.kind,
             ProviderKind::ChatCompletions | ProviderKind::Litellm
-        ) && field == p.token_limit_parameter.id()
+        ) {
+            return text;
+        }
+        if field == p.token_limit_parameter.id()
             && matches!(reason, "unsupported_parameter" | "unknown_parameter")
         {
             text.push_str(&format!(
                 "; set provider.token_limit_parameter to {} for this server (--token-limit-parameter)",
                 p.token_limit_parameter.other().id()
             ));
+        } else if field == "reasoning_effort" {
+            text.push_str(if sent.get(field).is_some() {
+                "; set provider.reasoning_effort to a value this server accepts (--reasoning-effort)"
+            } else {
+                "; no reasoning effort is configured, so this server used its default: set provider.reasoning_effort explicitly, for example none (--reasoning-effort)"
+            });
         }
         text
     }
@@ -122,20 +138,38 @@ mod tests {
     #[test]
     fn a_refused_field_is_named_only_in_the_engines_own_words() {
         let sent = json!({"model":"m","messages":[],"max_tokens":1,"stream_options":{}});
-        let field = |param: Value| Refusal(json!({"error":{"param":param}})).field(&sent);
-        assert_eq!(field(json!("max_tokens")), Some("max_tokens"));
-        assert_eq!(field(json!("messages[3].content")), Some("messages"));
+        let chat = ProviderKind::ChatCompletions;
+        let field =
+            |kind, param: Value| Refusal(json!({"error":{"param":param}})).field(kind, &sent);
+        assert_eq!(field(chat, json!("max_tokens")), Some("max_tokens"));
+        assert_eq!(field(chat, json!("messages[3].content")), Some("messages"));
         assert_eq!(
-            field(json!("stream_options.include_usage")),
+            field(chat, json!("stream_options.include_usage")),
             Some("stream_options")
         );
-        for unsent in [
+        // A field this protocol can carry is named even when it was left out:
+        // the server may be refusing the default it applied instead.
+        assert_eq!(
+            field(chat, json!("reasoning_effort")),
+            Some("reasoning_effort")
+        );
+        assert_eq!(
+            field(ProviderKind::Anthropic, json!("reasoning_effort")),
+            None
+        );
+        assert_eq!(
+            field(ProviderKind::AzureOpenai, json!("reasoning.effort")),
+            Some("reasoning")
+        );
+        for foreign in [
             json!(CANARY),
-            json!("max_completion_tokens"),
+            json!("temperature"),
+            json!("Reasoning_Effort"),
+            json!(""),
             json!(null),
             json!(7),
         ] {
-            assert_eq!(field(unsent), None);
+            assert_eq!(field(chat, foreign), None);
         }
     }
 
@@ -172,6 +206,24 @@ mod tests {
                 &sent("max_tokens")
             ),
             "anthropic request failed (HTTP 400, unsupported_parameter: max_tokens)"
+        );
+        // OpenAI's Chat Completions answer when tools meet its default reasoning.
+        let default_effort = Refusal(
+            json!({"error":{"message":CANARY,"type":"invalid_request_error","param":"reasoning_effort","code":null}}),
+        );
+        assert_eq!(
+            default_effort.describe(&p, 400, &newer),
+            "chat-completions request failed (HTTP 400, invalid_request: reasoning_effort); no reasoning effort is configured, so this server used its default: set provider.reasoning_effort explicitly, for example none (--reasoning-effort)"
+        );
+        let mut configured = newer.clone();
+        configured["reasoning_effort"] = json!("high");
+        assert_eq!(
+            refused("unsupported_value", "reasoning_effort").describe(&p, 400, &configured),
+            "chat-completions request failed (HTTP 400, unsupported_value: reasoning_effort); set provider.reasoning_effort to a value this server accepts (--reasoning-effort)"
+        );
+        assert_eq!(
+            default_effort.describe(&anthropic, 400, &sent("max_tokens")),
+            "anthropic request failed (HTTP 400, invalid_request)"
         );
         assert_eq!(
             Refusal(json!({"error":{"message":CANARY,"code":"invalid_api_key"}}))

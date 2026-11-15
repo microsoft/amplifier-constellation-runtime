@@ -289,6 +289,54 @@ impl Provider {
         }
         Ok((url, body))
     }
+    /// Every top-level field `request` can send for a protocol. A refusal is
+    /// described in these words only, whether or not this request used them.
+    fn request_fields(kind: ProviderKind) -> &'static [&'static str] {
+        match kind {
+            ProviderKind::Openai | ProviderKind::AzureOpenai | ProviderKind::Vllm => &[
+                "model",
+                "instructions",
+                "input",
+                "tools",
+                "max_output_tokens",
+                "store",
+                "stream",
+                "include",
+                "parallel_tool_calls",
+                "reasoning",
+                "max_tool_calls",
+                "text",
+            ],
+            ProviderKind::Anthropic => &[
+                "model",
+                "system",
+                "messages",
+                "tools",
+                "max_tokens",
+                "stream",
+                "cache_control",
+                "thinking",
+                "output_config",
+                "container",
+            ],
+            ProviderKind::Gemini => &["systemInstruction", "contents", "tools", "generationConfig"],
+            ProviderKind::Ollama => &[
+                "model", "messages", "tools", "stream", "options", "think", "format",
+            ],
+            ProviderKind::ChatCompletions | ProviderKind::Litellm => &[
+                "model",
+                "messages",
+                "tools",
+                "stream",
+                "max_tokens",
+                "max_completion_tokens",
+                "stream_options",
+                "reasoning_effort",
+                "response_format",
+            ],
+            ProviderKind::Mock | ProviderKind::GithubCopilot => &[],
+        }
+    }
     pub async fn complete(
         &mut self,
         instructions: &str,
@@ -584,5 +632,44 @@ mod tests {
         let ollama = body(ProviderKind::Ollama, TokenLimitParameter::default());
         assert_eq!(ollama["options"]["num_predict"], 8192);
         assert!(ollama.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn every_field_a_request_carries_is_in_its_protocols_vocabulary() {
+        use ProviderKind::*;
+        for kind in [
+            AzureOpenai,
+            Vllm,
+            Anthropic,
+            Gemini,
+            Ollama,
+            ChatCompletions,
+            Litellm,
+        ] {
+            let mut config = Config::initial("/".into(), "Fixture".into(), "fixture".into());
+            config.provider = crate::config::Provider::preset(kind, "fixture".into());
+            config.provider.endpoint = "http://127.0.0.1:9/v1".into();
+            config.provider.auth = ProviderAuth::None;
+            config.provider.reasoning_effort = Some("low".into());
+            config.provider.token_limit_parameter = match kind {
+                Litellm => TokenLimitParameter::MaxCompletionTokens,
+                _ => TokenLimitParameter::default(),
+            };
+            config.provider.native.json_schema = Some(json!({"type":"object"}));
+            if kind == AzureOpenai {
+                config.provider.native.tools = vec![json!({"type":"web_search"})];
+            }
+            let items = [json!({"role":"user","content":"hi","container":{"id":"c"}})];
+            let tools = [json!({"name":"t","description":"d","parameters":{"type":"object"}})];
+            let provider = Provider::new(&config).unwrap();
+            let (_, body) = provider.request("", &items, &tools).unwrap();
+            for field in body.as_object().unwrap().keys() {
+                assert!(
+                    Provider::request_fields(kind).contains(&field.as_str()),
+                    "{} can send {field}; add it to request_fields",
+                    kind.id()
+                );
+            }
+        }
     }
 }
