@@ -1,0 +1,106 @@
+{
+  "audience": "Agent builders and people connecting an ACP client",
+  "citations": [
+    {
+      "path": "README.md",
+      "ref": "a684e02f21400c4c8b67deca3db97addcabaa0f9",
+      "sha256": "81c52a39d9911920039ea04c066f3514e0586a5c0562bca19936cc989f03994e",
+      "url": "https://github.com/microsoft/amplifier-constellation-runtime/blob/a684e02f21400c4c8b67deca3db97addcabaa0f9/README.md"
+    },
+    {
+      "path": "docs/runtime-overview.md",
+      "ref": "a684e02f21400c4c8b67deca3db97addcabaa0f9",
+      "sha256": "54b4b0233e56c720f042fc9f325b72bc216e9d23fcdb0235faf83ce18e68f806",
+      "url": "https://github.com/microsoft/amplifier-constellation-runtime/blob/a684e02f21400c4c8b67deca3db97addcabaa0f9/docs/runtime-overview.md"
+    },
+    {
+      "path": "contracts/README.md",
+      "ref": "a684e02f21400c4c8b67deca3db97addcabaa0f9",
+      "sha256": "c707a0663c349836c1cd9df510f80de587b7ac51f26cbf03b92dd92b32a465a3",
+      "url": "https://github.com/microsoft/amplifier-constellation-runtime/blob/a684e02f21400c4c8b67deca3db97addcabaa0f9/contracts/README.md"
+    }
+  ],
+  "display_name": "Constellation Runtime",
+  "edges": [
+    {
+      "from": "instance",
+      "relation": "uses",
+      "to": "self"
+    },
+    {
+      "from": "client",
+      "relation": "uses",
+      "to": "self"
+    },
+    {
+      "from": "self",
+      "relation": "contains",
+      "to": "loop"
+    },
+    {
+      "from": "self",
+      "relation": "contains",
+      "to": "state"
+    },
+    {
+      "from": "loop",
+      "relation": "uses",
+      "to": "providers"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "self",
+      "kind": "self",
+      "label": "Constellation Runtime",
+      "repository": "microsoft/amplifier-constellation-runtime"
+    },
+    {
+      "id": "instance",
+      "kind": "external",
+      "label": "Constellation Instance (optional)",
+      "repository": "microsoft/amplifier-constellation-instance"
+    },
+    {
+      "id": "client",
+      "kind": "external",
+      "label": "Direct ACP client"
+    },
+    {
+      "id": "loop",
+      "kind": "internal",
+      "label": "Model and tool loop"
+    },
+    {
+      "id": "state",
+      "kind": "internal",
+      "label": "Saved execution sessions"
+    },
+    {
+      "id": "providers",
+      "kind": "external",
+      "label": "Model providers and tools"
+    }
+  ],
+  "notes": [
+    "This is an engine implementation, not the entire installed Agent Instance boundary.",
+    "Direct local ACP clients can omit Instance.",
+    "Saved engine execution sessions are distinct from source Conversations."
+  ],
+  "page_kind": "engine infrastructure",
+  "purpose": "Run an agent’s reasoning and tools with configured model providers and saved sessions.",
+  "ref": "a684e02f21400c4c8b67deca3db97addcabaa0f9",
+  "repository": "microsoft/amplifier-constellation-runtime",
+  "roles": [],
+  "start_cta": {
+    "basis": "Existing approved README route; target release assets/availability not freshly audited in this plan.",
+    "label": "Get the engine",
+    "url": "https://github.com/microsoft/amplifier-constellation-runtime/releases"
+  },
+  "summary": "A reasoning and tool-execution engine that an Instance or direct ACP client can use.",
+  "supports_roles": [
+    "Agent Instance",
+    "Tool"
+  ],
+  "visibility": "public"
+}
