@@ -27,6 +27,8 @@ class Handler(ResponsesWebSocketMixin, BaseHTTPRequestHandler):
         turn=len(case['requests']); tool=turn==1
         if case.get('http_error'):
             self.send_response(429);self.end_headers();self.wfile.write(b'fixture body includes private credential, never display');return
+        if case.get('refusal') and case.get('refuse_when',lambda sent:True)(body):
+            raw=json.dumps(case['refusal']).encode();self.send_response(400);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw);return
         events=[]; reason='length' if case.get('length') else None
         if kind in ['openai','azure-openai','vllm']:
             out=[{'type':'function_call','call_id':'call-1','name':'workspace_write','arguments':json.dumps(ARGS)}] if tool else [{'type':'message','role':'assistant','content':[{'type':'output_text','text':'Verified café'}]}]
@@ -198,6 +200,91 @@ class Tests(unittest.TestCase):
         h,_,_=self.server.case['requests'][0];self.assertNotIn('authorization',{k.lower():v for k,v in h.items()})
     def test_http_error_does_not_retry_or_expose_response_body(self):
         self.setup_kind('anthropic',http_error=True);c=self.client();s=c.call('session/new',{'cwd':str(self.work),'mcpServers':[]})['result']['sessionId'];r=self.prompt(c,s);self.assertIn('HTTP 429',r['error']['message']);self.assertNotIn('private credential',str(r));self.assertEqual(len(self.server.case['requests']),1)
+    def events(self):
+        import sqlite3
+        db=sqlite3.connect(self.home/'history.sqlite3')
+        try:return ' '.join(r[0] for r in db.execute('SELECT data FROM events'))
+        finally:db.close()
+    def test_refused_request_names_an_allowlisted_reason_never_provider_text(self):
+        # OpenAI's Chat Completions answer for a current model, plus a canary.
+        refusal={'error':{'message':"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead. PRIVATE_ERROR_CANARY",'type':'invalid_request_error','param':'max_tokens','code':'unsupported_parameter'}}
+        for kind in ['chat-completions','litellm']:
+            with self.subTest(kind=kind):
+                self.setup_kind(kind,refusal=refusal,refuse_when=lambda sent:'max_tokens' in sent);path=self.home/'runtime.json';cfg=json.loads(path.read_text())
+                cfg['provider'].pop('token_limit_parameter',None);path.write_text(json.dumps(cfg))
+                c=self.client();s=c.call('session/new',{'cwd':str(self.work),'mcpServers':[]})['result']['sessionId'];r=self.prompt(c,s)
+                self.assertEqual(r['error']['message'],kind+' request failed (HTTP 400, unsupported_parameter: max_tokens); set provider.token_limit_parameter to max_completion_tokens for this server (--token-limit-parameter)')
+                self.assertEqual(len(self.server.case['requests']),1,'a refused request is reported, not resent')
+                for private in ['PRIVATE_ERROR_CANARY','Use ','is not supported']:self.assertNotIn(private,str(r)+json.dumps(c.updates)+self.events())
+                self.close(c)
+                # The owner's correction lets the same saved session continue.
+                cfg['provider']['token_limit_parameter']='max_completion_tokens';path.write_text(json.dumps(cfg))
+                c=self.client();c.call('session/load',{'sessionId':s,'cwd':str(self.work),'mcpServers':[]})
+                self.assertEqual(self.prompt(c,s,'recall').get('result',{}).get('stopReason'),'end_turn');self.assertIn('Verified caf',json.dumps(c.updates))
+                sent=self.server.case['requests'][1][1];self.assertEqual(sent['max_completion_tokens'],8192);self.assertNotIn('max_tokens',sent)
+                self.assertEqual(len(self.server.case['requests']),2);self.close(c)
+    def test_refused_default_reasoning_names_the_setting_to_change(self):
+        # OpenAI's Chat Completions answer when tools meet the model's default
+        # reasoning. The engine sent no reasoning_effort; it is still a field
+        # this protocol can carry, so it is named in the engine's own words.
+        refusal={'error':{'message':"Function tools with reasoning_effort are not supported for gpt-6-luna in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'. PRIVATE_ERROR_CANARY",'type':'invalid_request_error','param':'reasoning_effort','code':None}}
+        for kind in ['chat-completions','litellm']:
+            with self.subTest(kind=kind):
+                self.setup_kind(kind,refusal=refusal,refuse_when=lambda sent:sent.get('reasoning_effort')!='none');path=self.home/'runtime.json';cfg=json.loads(path.read_text())
+                cfg['provider']['token_limit_parameter']='max_completion_tokens';path.write_text(json.dumps(cfg))
+                c=self.client();s=c.call('session/new',{'cwd':str(self.work),'mcpServers':[]})['result']['sessionId'];r=self.prompt(c,s)
+                self.assertEqual(r['error']['message'],kind+' request failed (HTTP 400, invalid_request: reasoning_effort); no reasoning effort is configured, so this server used its default: set provider.reasoning_effort explicitly, for example none (--reasoning-effort)')
+                sent=self.server.case['requests'][0][1];self.assertNotIn('reasoning_effort',sent);self.assertTrue(sent['tools']);self.assertEqual(len(self.server.case['requests']),1)
+                for private in ['PRIVATE_ERROR_CANARY','Function tools','/v1/responses','gpt-6-luna']:self.assertNotIn(private,str(r)+json.dumps(c.updates)+self.events())
+                self.close(c)
+                # A configured value the server also refuses gets the other advice.
+                cfg['provider']['reasoning_effort']='high';path.write_text(json.dumps(cfg))
+                c=self.client();c.call('session/load',{'sessionId':s,'cwd':str(self.work),'mcpServers':[]});r=self.prompt(c,s,'again')
+                self.assertEqual(r['error']['message'],kind+' request failed (HTTP 400, invalid_request: reasoning_effort); set provider.reasoning_effort to a value this server accepts (--reasoning-effort)')
+                self.assertEqual(self.server.case['requests'][1][1]['reasoning_effort'],'high');self.close(c)
+                # The owner's correction lets the same saved session continue, tools included.
+                cfg['provider']['reasoning_effort']='none';path.write_text(json.dumps(cfg));self.server.case['requests'].clear()
+                c=self.client();c.call('session/load',{'sessionId':s,'cwd':str(self.work),'mcpServers':[]})
+                self.assertEqual(self.prompt(c,s).get('result',{}).get('stopReason'),'end_turn')
+                self.assertEqual((self.work/'provider-proof.txt').read_text(encoding='utf-8'),'verified café\n');self.assertEqual(len(self.server.case['requests']),2)
+                for _,body,_ in self.server.case['requests']:
+                    self.assertEqual(body['reasoning_effort'],'none');self.assertEqual(body['max_completion_tokens'],8192);self.assertTrue(body['tools'])
+                self.close(c);(self.work/'provider-proof.txt').unlink()
+        # A parameter outside this protocol's vocabulary is not named at all.
+        self.setup_kind('anthropic',refusal=refusal);cfg=json.loads(path.read_text());cfg['provider'].pop('token_limit_parameter');path.write_text(json.dumps(cfg))
+        c=self.client();s=c.call('session/new',{'cwd':str(self.work),'mcpServers':[]})['result']['sessionId']
+        self.assertEqual(self.prompt(c,s)['error']['message'],'anthropic request failed (HTTP 400, invalid_request)')
+    def test_refusal_text_that_only_looks_like_an_identifier_stays_private(self):
+        cases=[({'code':'PRIVATE_CODE_CANARY','type':'PRIVATE_TYPE_CANARY','param':'PRIVATE_PARAM_CANARY','message':'PRIVATE_ERROR_CANARY'},"(HTTP 400); check this provider's credential, endpoint, model and quota"),
+               ({'code':'PRIVATE_CODE_CANARY','type':'invalid_request_error','param':'tools[0].PRIVATE_PARAM_CANARY','message':'PRIVATE_ERROR_CANARY'},'(HTTP 400, invalid_request: tools)'),
+               ({'type':'authentication_error','message':'PRIVATE_ERROR_CANARY'},'(HTTP 400, authentication_failed)')]
+        for kind in ['chat-completions','anthropic','azure-openai']:
+            for error,expected in cases:
+                with self.subTest(kind=kind,expected=expected):
+                    self.setup_kind(kind,refusal={'error':error});c=self.client();s=c.call('session/new',{'cwd':str(self.work),'mcpServers':[]})['result']['sessionId'];r=self.prompt(c,s)
+                    self.assertEqual(r['error']['message'],kind+' request failed '+expected)
+                    self.assertNotIn('CANARY',str(r)+json.dumps(c.updates)+self.events());self.assertEqual(len(self.server.case['requests']),1);self.close(c)
+    def test_chat_token_limit_parameter_is_an_explicit_owner_choice(self):
+        endpoint=f'http://127.0.0.1:{self.server.server_port}/chat-completions'
+        for kind in ['chat-completions','litellm']:
+            for selected,absent in [(None,'max_completion_tokens'),('max_tokens','max_completion_tokens'),('max_completion_tokens','max_tokens')]:
+                with self.subTest(kind=kind,selected=selected):
+                    self.setup_kind(kind);path=self.home/'runtime.json'
+                    subprocess.run([str(protocol.BINARY),'--home',str(self.home),'configure-provider','--provider',kind,'--model','fixture','--endpoint',endpoint,'--key-env','PROVIDER_TEST_KEY']+(['--token-limit-parameter',selected] if selected else []),check=True,stdout=subprocess.DEVNULL)
+                    saved=json.loads(path.read_text())['provider']
+                    # Unused, the setting leaves saved configuration as it was.
+                    if absent=='max_completion_tokens':self.assertNotIn('token_limit_parameter',saved)
+                    else:self.assertEqual(saved['token_limit_parameter'],selected)
+                    c=self.client();s=c.call('session/new',{'cwd':str(self.work),'mcpServers':[]})['result']['sessionId']
+                    self.assertEqual(self.prompt(c,s).get('result',{}).get('stopReason'),'end_turn');self.assertEqual(len(self.server.case['requests']),2)
+                    for _,body,_ in self.server.case['requests']:
+                        self.assertEqual(body[selected or 'max_tokens'],8192);self.assertNotIn(absent,body)
+                    self.close(c);(self.work/'provider-proof.txt').unlink()
+        # Protocols with one fixed field refuse the setting instead of ignoring it.
+        self.setup_kind('ollama');path=self.home/'runtime.json';cfg=json.loads(path.read_text());cfg['provider']['token_limit_parameter']='max_completion_tokens'
+        candidate=Path(self.tmp.name)/'candidate.json';candidate.write_text(json.dumps(cfg))
+        r=subprocess.run([str(protocol.BINARY),'--home',str(self.home),'config-validate',str(candidate)],capture_output=True,text=True)
+        self.assertNotEqual(r.returncode,0);self.assertIn('token_limit_parameter applies only to the chat-completions and litellm providers',r.stderr)
     def test_provider_cli_and_mock_need_no_credentials_or_network(self):
         rows=json.loads(subprocess.check_output([str(protocol.BINARY),'providers'],text=True));self.assertEqual(len(rows),10)
         subprocess.run([str(protocol.BINARY),'--home',str(self.home),'init','--workspace',str(self.work),'--provider','mock'],check=True,stdout=subprocess.DEVNULL)

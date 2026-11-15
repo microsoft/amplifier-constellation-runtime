@@ -1,5 +1,8 @@
 use agent_runtime::{
-    config::{Config, Provider, ProviderAuth, ProviderKind, private_dir, private_write},
+    config::{
+        Config, Provider, ProviderAuth, ProviderKind, TokenLimitParameter, private_dir,
+        private_write,
+    },
     store::Store,
 };
 use anyhow::{Context, Result, ensure};
@@ -158,6 +161,9 @@ struct ProviderOptions {
     tls_ca_file: Option<PathBuf>,
     #[arg(long)]
     allow_insecure_http: bool,
+    /// Field carrying the output-token limit to a compatible chat server.
+    #[arg(long, value_enum, default_value = "max_tokens")]
+    token_limit_parameter: TokenLimitParameter,
 }
 impl ProviderOptions {
     fn build(self) -> Result<Provider> {
@@ -194,6 +200,7 @@ impl ProviderOptions {
         p.api_version = self.api_version;
         p.tls_ca_file = self.tls_ca_file;
         p.allow_insecure_http = self.allow_insecure_http;
+        p.token_limit_parameter = self.token_limit_parameter;
         Ok(p)
     }
 }
