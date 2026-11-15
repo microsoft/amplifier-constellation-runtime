@@ -102,6 +102,12 @@ pub struct Provider {
     pub allow_insecure_http: bool,
     #[serde(default)]
     pub mock_response: Option<String>,
+    /// Explicit owner acceptance of an OpenAI or Claude model name that this
+    /// version's dated catalog does not list. The exact name is used unchanged
+    /// and is reported as unverified; nothing is substituted. Absent when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[schemars(extend("default" = false))]
+    pub allow_unverified_model: bool,
     #[serde(default, skip_serializing_if = "crate::capabilities::Native::is_empty")]
     pub native: crate::capabilities::Native,
 }
@@ -203,6 +209,7 @@ impl Provider {
             tls_ca_file: None,
             allow_insecure_http: false,
             mock_response: None,
+            allow_unverified_model: false,
             native: Default::default(),
         }
     }

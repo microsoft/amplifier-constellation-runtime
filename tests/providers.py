@@ -188,6 +188,11 @@ class Tests(unittest.TestCase):
     def test_no_auth_local_server_does_not_receive_an_inherited_key(self):
         self.setup_kind('ollama');p=self.home/'runtime.json';cfg=json.loads(p.read_text());cfg['provider']['auth']='none';p.write_text(json.dumps(cfg));c=self.client();s=c.call('session/new',{'cwd':str(self.work),'mcpServers':[]})['result']['sessionId'];self.prompt(c,s)
         h,_,_=self.server.case['requests'][0];self.assertNotIn('authorization',{k.lower():v for k,v in h.items()})
+    def test_opted_in_unlisted_model_is_sent_exactly_as_named(self):
+        self.setup_kind('anthropic');p=self.home/'runtime.json';cfg=json.loads(p.read_text());cfg['provider'].update(model='claude-unlisted-fixture',allow_unverified_model=True);p.write_text(json.dumps(cfg))
+        c=self.client();s=c.call('session/new',{'cwd':str(self.work),'mcpServers':[]})['result']['sessionId']
+        self.assertEqual(self.prompt(c,s)['result']['stopReason'],'end_turn')
+        self.assertEqual([body['model'] for _,body,_ in self.server.case['requests']],['claude-unlisted-fixture']*2)
     def test_http_error_does_not_retry_or_expose_response_body(self):
         self.setup_kind('anthropic',http_error=True);c=self.client();s=c.call('session/new',{'cwd':str(self.work),'mcpServers':[]})['result']['sessionId'];r=self.prompt(c,s);self.assertIn('HTTP 429',r['error']['message']);self.assertNotIn('private credential',str(r));self.assertEqual(len(self.server.case['requests']),1)
     def test_provider_cli_and_mock_need_no_credentials_or_network(self):

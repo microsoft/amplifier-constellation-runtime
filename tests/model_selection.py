@@ -169,6 +169,35 @@ class Tests(unittest.TestCase):
         self.assertIn('result', c.call('session/delete', {'sessionId': sid}))
         self.assertEqual(self.snapshot(sid)['session_model_choices'], [])
 
+    def test_unlisted_model_option_needs_the_owner_opt_in_and_keeps_saved_choices(self):
+        c = self.client()
+        earlier = self.new(c)
+        self.assertIn('result', self.select(c, earlier, 'model', 'fixture-fast'))
+        c.close()
+        self.clients.remove(c)
+        config = json.loads(self.path.read_text())
+        config['model_options'].append({'model': 'gpt-unlisted-fixture', 'name': 'Unlisted'})
+        self.path.write_text(json.dumps(config))
+        command = [str(protocol.BINARY), '--home', str(self.home), 'capabilities']
+        refused = subprocess.run(command, capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(refused.returncode, 0, refused.stdout)
+        self.assertIn('allow_unverified_model', refused.stderr)
+        config['provider']['allow_unverified_model'] = True
+        self.path.write_text(json.dumps(config))
+        report = json.loads(subprocess.run(command, capture_output=True, text=True, timeout=10,
+                                           check=True).stdout)
+        self.assertEqual({x['model']: x['model_catalog_status'] for x in report['model_options']},
+                         {'fixture': 'not_enforced', 'fixture-fast': 'not_enforced',
+                          'gpt-unlisted-fixture': 'unverified'})
+        c = self.client()
+        loaded = c.call('session/load', {'sessionId': earlier, 'cwd': str(self.work), 'mcpServers': []})
+        values = {x['id']: x['currentValue'] for x in loaded['result']['configOptions']}
+        self.assertEqual(values['model'], 'fixture-fast', 'The opt-in is not a route change')
+        sid = self.new(c)
+        self.assertIn('result', self.select(c, sid, 'model', 'gpt-unlisted-fixture'))
+        self.prompt(c, sid, 'use the selected model')
+        self.assertEqual(protocol.REQUESTS[-1]['model'], 'gpt-unlisted-fixture')
+
     def test_invalid_owner_options_fail_configuration_without_touching_history(self):
         original = json.loads(self.path.read_text())
         for mutate in [

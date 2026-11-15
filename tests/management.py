@@ -27,6 +27,39 @@ class Tests(unittest.TestCase):
         config['provider']['invented_setting']=True;candidate.write_text(json.dumps(config))
         self.assertNotEqual(self.run_cli('config-validate',candidate,check=False).returncode,0)
         self.assertEqual(json.loads(self.run_cli('config-inspect').stdout)['config']['name'],'Changed safely')
+    def test_unlisted_model_needs_an_explicit_opt_in_and_is_reported_unverified(self):
+        unlisted='claude-unlisted-fixture';before=(self.home/'runtime.json').read_bytes()
+        refused=self.run_cli('configure-provider','--provider','anthropic','--model',unlisted,check=False)
+        self.assertNotEqual(refused.returncode,0);self.assertIn('--allow-unverified-model',refused.stderr)
+        self.assertEqual((self.home/'runtime.json').read_bytes(),before)
+        self.run_cli('configure-provider','--provider','anthropic','--model',unlisted,'--allow-unverified-model')
+        inspected=json.loads(self.run_cli('config-inspect').stdout)
+        self.assertTrue(inspected['validation']['valid'])
+        self.assertEqual(inspected['config']['provider']['model'],unlisted)
+        self.assertIs(inspected['config']['provider']['allow_unverified_model'],True)
+        report=inspected['capabilities']
+        self.assertEqual((report['model'],report['model_catalog_status']),(unlisted,'unverified'))
+        self.assertEqual(report['model_options'],[{'model':unlisted,'model_catalog_status':'unverified'}])
+        self.assertIs(report['account_and_model_support_verified'],False)
+        check=json.loads(self.run_cli('check').stdout)
+        self.assertEqual((check['model'],check['model_catalog_status']),(unlisted,'unverified'))
+        self.assertNotIn(unlisted,json.dumps(json.loads(self.run_cli('config-schema').stdout)['x-agent-runtime']))
+        candidate=Path(self.temp.name)/'candidate.json';config=inspected['config']
+        candidate.write_text(json.dumps(config))
+        self.assertEqual(json.loads(self.run_cli('config-validate',candidate).stdout)['model_catalog_status'],'unverified')
+        # Turning the opt-in off is refused while the unlisted name is configured.
+        del config['provider']['allow_unverified_model'];candidate.write_text(json.dumps(config))
+        self.assertIn('allow_unverified_model',self.run_cli('config-validate',candidate,check=False).stderr)
+        # A listed model needs no opt-in and saves none; other routes have nothing to opt in to.
+        self.run_cli('configure-provider','--provider','anthropic','--model','claude-sonnet-5-5')
+        inspected=json.loads(self.run_cli('config-inspect').stdout)
+        self.assertNotIn('allow_unverified_model',inspected['config']['provider'])
+        self.assertEqual(inspected['capabilities']['model_catalog_status'],'listed')
+        other=self.run_cli('configure-provider','--provider','gemini','--model','gemini-3.8-flash','--allow-unverified-model',check=False)
+        self.assertNotEqual(other.returncode,0);self.assertIn('applies only',other.stderr)
+        schema=json.loads(self.run_cli('config-schema').stdout)
+        self.assertEqual(schema['$defs']['Provider']['properties']['allow_unverified_model']['type'],'boolean')
+        self.assertNotIn('allow_unverified_model',schema['$defs']['Provider']['required'])
     def test_real_loopback_signin_rejects_bad_state_without_credential_write(self):
         process=subprocess.Popen([str(BINARY),'--home',str(self.home),'chatgpt-sign-in','--port','0','--no-browser'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
         try:
