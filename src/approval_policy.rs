@@ -81,9 +81,49 @@ fn file_args(config: &Config, cwd: &Path, args: &Value) -> Option<Value> {
     Some(effective)
 }
 
-fn descriptor(scope: Value, description: &'static str) -> Value {
+fn descriptor(scope: Value, description: &str) -> Value {
     json!({"version":1,"producer":PRODUCER,"key":digest("resolved-request",&scope),
         "description":description,"allowOptionId":"allow_once","authorityLifetime":"request"})
+}
+
+fn label(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars().filter(|ch| {
+        !ch.is_control() && !matches!(ch, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+    }) {
+        if out.len() + ch.len_utf8() > 77 {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn scope_description(operation: &Value, effective: &Value, sentence: &str) -> String {
+    let target = if operation["kind"] == "mcp" {
+        format!(
+            "MCP tool: {}",
+            label(operation["name"].as_str().unwrap_or("tool"))
+        )
+    } else if operation["name"] == "workspace_run" {
+        let command = effective["input"]["command"].as_str().unwrap_or("command");
+        format!(
+            "Run: {}",
+            label(command.rsplit(['/', '\\']).next().unwrap_or(command))
+        )
+    } else {
+        let verb = if operation["name"] == "workspace_save_artifact" {
+            "Save artifact"
+        } else {
+            "Write"
+        };
+        format!(
+            "{verb}: {}",
+            label(effective["path"]["relative"].as_str().unwrap_or("file"))
+        )
+    };
+    format!("{target}. {sentence}")
 }
 
 fn command_arguments(args: &Value, browser_paths: Option<[Option<String>; 2]>) -> Value {
@@ -187,9 +227,10 @@ pub fn annotate(
             description,
         )
     };
+    let description = scope_description(&operation, &effective, description);
     call["_meta"][META] = descriptor(
         json!({"operation":operation,"arguments":effective,"policy":policy}),
-        description,
+        &description,
     );
 }
 
@@ -262,6 +303,12 @@ mod tests {
         assert!(!first.to_string().contains(root.to_str().unwrap()));
         assert_eq!(first["authorityLifetime"], "request");
         assert_eq!(first["allowOptionId"], "allow_once");
+        assert!(
+            first["description"]
+                .as_str()
+                .unwrap()
+                .starts_with("Write: same.txt.")
+        );
         definition["description"] = json!("Display copy is not authority");
         assert_eq!(write(&config, &definition, &args), first);
         assert_eq!(
@@ -395,5 +442,36 @@ mod tests {
             key(Some([None, Some("/second".into())]))
         );
         assert_ne!(key(None), empty);
+    }
+
+    #[test]
+    fn display_labels_identify_targets_without_content_arguments_or_endpoint_and_do_not_change_keys()
+     {
+        let command = scope_description(
+            &json!({"kind":"builtin","name":"workspace_run"}),
+            &command_arguments(
+                &json!({"command":"/private/root/tool","args":["credential-value"]}),
+                None,
+            ),
+            "Exact arguments only.",
+        );
+        assert_eq!(command, "Run: tool. Exact arguments only.");
+        let mcp = scope_description(
+            &json!({"kind":"mcp","name":"create_ticket","connection":"secret-connection-binding"}),
+            &json!({"token":"never-display"}),
+            "Exact connection and arguments.",
+        );
+        assert_eq!(
+            mcp,
+            "MCP tool: create_ticket. Exact connection and arguments."
+        );
+        let scope = json!({"exact":"private scope"});
+        assert_eq!(
+            descriptor(scope.clone(), "First label")["key"],
+            descriptor(scope, "Second label")["key"]
+        );
+        let long = label(&format!("\n{}\u{202e}", "界".repeat(100)));
+        assert!(long.len() <= 80);
+        assert!(!long.contains('\n') && !long.contains('\u{202e}'));
     }
 }

@@ -430,6 +430,7 @@ class ReusableApprovalScopes(unittest.TestCase):
             "version": 1, "owner": "instance", "producer": POLICY_PRODUCER, "reusableRequests": True})
         self.prompt(first, [self.step("workspace_write", args)], approve=True)
         one = self.descriptor(first)
+        self.assertTrue(one["description"].startswith("Write: proof.txt."))
         self.assertEqual((self.work / "proof.txt").read_text(), args["content"])
         (self.work / "proof.txt").unlink()
         second = self.client()
@@ -483,6 +484,7 @@ class ReusableApprovalScopes(unittest.TestCase):
             client = self.client(servers=[spec])
             self.prompt(client, [self.step("@mcp", {"private": "data"})], approve=True)
             descriptor = self.descriptor(client)
+            self.assertTrue(descriptor["description"].startswith("MCP tool: observe."))
             keys.append(descriptor["key"])
             for private in ["Bearer", "first", "second", self.url, '"private"']:
                 self.assertNotIn(private, json.dumps(descriptor))

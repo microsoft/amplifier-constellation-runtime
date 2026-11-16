@@ -81,8 +81,12 @@ protocol, or the actual stdio command, arguments, explicit environment and
 working folder. The key binds the original MCP tool name and schema; server
 labels, registry aliases and display prose do not define authority. Native
 computer requests additionally bind their configured environment and exact
-actions and safety checks. Raw credentials and these scope values are not
-included in the descriptor; only their domain-separated digest is exposed.
+actions and safety checks. To identify a rule when reviewing or revoking it, the
+description includes only a bounded relative target path, command executable
+basename or registered MCP tool name. It omits absolute workspace paths,
+written content, command arguments, endpoints and credentials. Descriptions
+are plain display text, never matching authority; the complete scope is bound
+by its domain-separated digest.
 
 Keys do not include chat, call or Instance IDs, so the host can remember the
 same scope across its agent's chats. The host must also bind rules to its
