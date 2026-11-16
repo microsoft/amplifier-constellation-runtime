@@ -104,7 +104,7 @@ class Handler(ResponsesWebSocketMixin, BaseHTTPRequestHandler):
             if name == "@mcp":
                 name = next(tool["name"] for tool in body["tools"]
                             if tool.get("name", "").startswith("mcp_"))
-            if any(tool.get("name") == name for tool in body["tools"]):
+            if step.get("unlisted") or any(tool.get("name") == name for tool in body["tools"]):
                 call = {"type": "function_call", "call_id": f"{label}-call-{completed}",
                         "name": name, "arguments": json.dumps(step["arguments"])}
                 call.update(step.get("provider_fields", {}))
@@ -172,8 +172,9 @@ class ToolPermissions(unittest.TestCase):
         return label, result
 
     @staticmethod
-    def step(name, arguments, **provider_fields):
-        return {"name": name, "arguments": arguments, "provider_fields": provider_fields}
+    def step(name, arguments, unlisted=False, **provider_fields):
+        return {"name": name, "arguments": arguments, "unlisted": unlisted,
+                "provider_fields": provider_fields}
 
     def assert_failed_without_permission(self, client, label, name):
         self.assertEqual(client.callbacks, [], "Invalid input reached a client authority callback")
@@ -323,6 +324,32 @@ class ToolPermissions(unittest.TestCase):
         self.assertIn("result", reply)
         self.assertEqual(self.server.effects, [{"name": "observe", "arguments": args}])
         self.assert_bound_identity(client, {"version": 1, "kind": "mcp", "name": "observe", "server": "other-service"})
+
+    def test_unlisted_tool_name_fails_that_call_and_the_turn_continues(self):
+        # A model sometimes asks for a tool's own name where the session lists
+        # it with a prefix, or for a prefix from another session.
+        for requested in ["observe", "mcp_7_observe", "workspace_wrote"]:
+            with self.subTest(requested=requested):
+                client = self.client("minecraft")
+                effects = len(self.server.effects)
+                label, reply = self.prompt(client, [self.step(requested, {}, unlisted=True),
+                                                    self.step("@mcp", {})], approve=True)
+                self.assertEqual(reply["result"]["stopReason"], "end_turn", reply)
+                wrong, right = f"{label}-call-0", f"{label}-call-1"
+                self.assertEqual([call["call_id"] for call in self.server.emitted[-2:]], [wrong, right])
+                # Nothing was announced, authorized or run for the unlisted name.
+                touched = [frame["params"]["update"].get("toolCallId") for frame in client.updates
+                           if frame.get("method") == "session/update"]
+                self.assertNotIn(wrong, touched)
+                self.assertEqual([frame["params"]["toolCall"]["toolCallId"] for frame in client.callbacks],
+                                 [right])
+                self.assertEqual(len(self.server.effects), effects + 1)
+                # The model was told, without its own text repeated, and could correct itself.
+                told = [item["output"] for request in self.server.requests for item in request["input"]
+                        if item.get("type") == "function_call_output" and item.get("call_id") == wrong]
+                self.assertTrue(told and "nothing was run" in told[0], told)
+                self.assertNotIn(requested, told[0].replace("mcp_0_observe", ""))
+                self.assertEqual("mcp_0_observe" in told[0], requested != "workspace_wrote", told[0])
 
     def test_cancelled_permission_does_not_accept_a_late_allow_reply(self):
         client = self.client()
