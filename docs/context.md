@@ -75,10 +75,14 @@ transport failures without exporting raw error bodies or message contents.
 Anthropic uses capability-checked on-demand compaction (`compact-2026-09-04`).
 The exact signed block is retained with the unchanged system/tools/settings.
 Compaction is applied only after its terminal success, including streamed
-responses. Unsupported account/model routes fail explicitly with original
-history preserved; disable `provider_compaction` to select the extractive
-fallback. This release uses foreground compaction; it does not race background
-summaries against an evolving transcript.
+responses. The service refuses a request whose final assistant message ends on
+a reasoning block. A reply with reasoning and no text ends that way, and the
+working window ends on it when maintenance runs before a waiting input is added.
+The summary request omits that trailing reasoning; saved history, the checkpoint
+binding and later model requests are unchanged. Unsupported account/model routes
+fail explicitly with original history preserved; disable `provider_compaction`
+to select the extractive fallback. This release uses foreground compaction; it
+does not race background summaries against an evolving transcript.
 
 Checkpoints are bound to the original prefix, provider and settings hashes.
 They survive restart but cannot be applied to a changed prefix. A restored native

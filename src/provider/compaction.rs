@@ -86,6 +86,29 @@ fn server_window(original: &[Value], base: Vec<Value>) -> Vec<Value> {
     base
 }
 
+/// The provider refuses a request whose final assistant message ends on a
+/// reasoning block. A reply with reasoning and no text ends that way, and the
+/// window ends on it whenever maintenance runs before the next input is added.
+/// The summary request leaves that trailing reasoning out: it has no public
+/// content. Saved history and later model requests keep it unchanged.
+fn drop_trailing_reasoning(messages: &mut Vec<Value>) {
+    let Some(last) = messages.last_mut().filter(|m| m["role"] == "assistant") else {
+        return;
+    };
+    let Some(content) = last["content"].as_array_mut() else {
+        return;
+    };
+    while content
+        .last()
+        .is_some_and(|b| b["type"] == "thinking" || b["type"] == "redacted_thinking")
+    {
+        content.pop();
+    }
+    if content.is_empty() {
+        messages.pop();
+    }
+}
+
 impl Provider {
     /// Serialize context maintenance or a local capacity stop with the socket's
     /// steering owner. Accepted successors must settle before the engine ends
@@ -352,6 +375,9 @@ impl Provider {
             "This model route does not advertise native compaction; full history retained"
         );
         let (_, mut body) = self.request(instructions, items, tools)?;
+        if let Some(messages) = body["messages"].as_array_mut() {
+            drop_trailing_reasoning(messages);
+        }
         body["stream"] = json!(true);
         body["compaction"] = json!({"type":"summarize"});
         body.as_object_mut().unwrap().remove("tool_choice");
@@ -416,5 +442,48 @@ mod tests {
         );
         let changed = vec![json!({"role":"user","content":"different"})];
         assert_eq!(restored(&changed, vec![cp], "settings").unwrap().0, changed);
+    }
+    #[test]
+    fn summary_request_never_ends_on_reasoning() {
+        let user = json!({"role":"user","content":[{"type":"text","text":"overheard"}]});
+        let thinking = json!({"type":"thinking","thinking":"","signature":"s"});
+        let text = json!({"type":"text","text":"said"});
+        let call = json!({"type":"tool_use","id":"t","name":"n","input":{}});
+        // A reply with reasoning only: the whole message goes.
+        let mut m = vec![
+            user.clone(),
+            json!({"role":"assistant","content":[thinking.clone(), json!({"type":"redacted_thinking","data":"d"})]}),
+        ];
+        drop_trailing_reasoning(&mut m);
+        assert_eq!(m, vec![user.clone()]);
+        // Reasoning before text or a tool call is not at the end and stays.
+        for kept in [
+            vec![thinking.clone(), text.clone()],
+            vec![thinking.clone(), call],
+        ] {
+            let original = vec![user.clone(), json!({"role":"assistant","content":kept})];
+            let mut m = original.clone();
+            drop_trailing_reasoning(&mut m);
+            assert_eq!(m, original);
+        }
+        // Only reasoning after the last public block goes.
+        let mut m = vec![
+            user.clone(),
+            json!({"role":"assistant","content":[text.clone(), thinking.clone()]}),
+        ];
+        drop_trailing_reasoning(&mut m);
+        assert_eq!(
+            m,
+            vec![user.clone(), json!({"role":"assistant","content":[text]})]
+        );
+        // Reasoning in an earlier assistant message is untouched when a user message ends the window.
+        let original = vec![
+            user.clone(),
+            json!({"role":"assistant","content":[thinking]}),
+            user,
+        ];
+        let mut m = original.clone();
+        drop_trailing_reasoning(&mut m);
+        assert_eq!(m, original);
     }
 }
