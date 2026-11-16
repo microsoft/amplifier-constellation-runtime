@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -19,6 +20,8 @@ from responses_ws import ResponsesWebSocketMixin
 
 
 META = "com.microsoft.amplifier.tool"
+POLICY_META = "com.microsoft.amplifier.approval-policy"
+POLICY_PRODUCER = "microsoft.amplifier-constellation-runtime"
 
 
 class PermissionClient(Client):
@@ -71,11 +74,11 @@ class Handler(ResponsesWebSocketMixin, BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             if method == "initialize":
-                result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
+                result = {"protocolVersion": getattr(self.server, "mcp_protocol", "2025-06-18"), "capabilities": {"tools": {}},
                           "serverInfo": {"name": "permission-fixture", "version": "1"}}
             elif method == "tools/list":
                 result = {"tools": [{"name": "observe", "description": "Fixture observation",
-                                     "inputSchema": {"type": "object"},
+                                     "inputSchema": getattr(self.server, "mcp_schema", {"type": "object"}),
                                      "annotations": {"readOnlyHint": True}}]}
             elif method == "tools/call":
                 self.server.effects.append(copy.deepcopy(body["params"]))
@@ -373,6 +376,185 @@ class ToolPermissions(unittest.TestCase):
         self.prompt(client, [])
         self.assertFalse((self.work / "cancelled.txt").exists())
         self.assertEqual(len(client.callbacks), 1)
+
+
+class ReusableApprovalScopes(unittest.TestCase):
+    """Host-owned rules: the Runtime describes scope, never stores a decision."""
+    setUp = ToolPermissions.setUp
+    tearDown = ToolPermissions.tearDown
+    prompt = ToolPermissions.prompt
+    step = staticmethod(ToolPermissions.step)
+    assert_bound_identity = ToolPermissions.assert_bound_identity
+    test_cancelled_permission_does_not_accept_a_late_allow_reply = ToolPermissions.test_cancelled_permission_does_not_accept_a_late_allow_reply
+
+    def client(self, *, negotiation=True, servers=None, cwd=None, additional=None):
+        client = PermissionClient(self.home)
+        self.clients.append(client)
+        params = {"protocolVersion": 1, "clientCapabilities": {}}
+        if negotiation is not False:
+            params["_meta"] = {POLICY_META: ({"version": 1, "owner": "instance", "instanceId": str(uuid.uuid4())}
+                                           if negotiation is True else negotiation)}
+        reply = client.call("initialize", params)
+        self.assertIn("result", reply, reply)
+        client.initialized = reply["result"]
+        params = {"cwd": str(cwd or self.work), "mcpServers": servers or []}
+        if additional is not None:
+            params["additionalDirectories"] = [str(p) for p in additional]
+        new = client.call("session/new", params)
+        self.assertIn("result", new, new)
+        client.session = new["result"]["sessionId"]
+        return client
+
+    def descriptor(self, client):
+        call = client.callbacks[-1]["params"]["toolCall"]
+        descriptor = call["_meta"][POLICY_META]
+        self.assertEqual(set(descriptor), {"version", "producer", "key", "description", "allowOptionId", "authorityLifetime"})
+        self.assertEqual(descriptor["version"], 1)
+        self.assertEqual(descriptor["producer"], POLICY_PRODUCER)
+        self.assertEqual(descriptor["allowOptionId"], "allow_once")
+        self.assertEqual(descriptor["authorityLifetime"], "request")
+        self.assertRegex(descriptor["key"], "^[0-9a-f]{64}$")
+        self.assertTrue(1 <= len(descriptor["description"]) <= 256)
+        announcements = [frame["params"]["update"] for frame in client.updates
+                         if frame.get("method") == "session/update"
+                         and frame["params"]["update"].get("sessionUpdate") == "tool_call"
+                         and frame["params"]["update"].get("toolCallId") == call["toolCallId"]]
+        self.assertEqual(len(announcements), 1)
+        self.assertEqual(announcements[0]["_meta"][POLICY_META], descriptor)
+        return descriptor
+
+    def test_exact_scope_survives_new_chat_process_and_instance_ids_without_caching_authority(self):
+        args = {"path": "proof.txt", "content": "exact private body"}
+        first = self.client()
+        self.assertEqual(first.initialized["_meta"][POLICY_META], {
+            "version": 1, "owner": "instance", "producer": POLICY_PRODUCER, "reusableRequests": True})
+        self.prompt(first, [self.step("workspace_write", args)], approve=True)
+        one = self.descriptor(first)
+        self.assertEqual((self.work / "proof.txt").read_text(), args["content"])
+        (self.work / "proof.txt").unlink()
+        second = self.client()
+        self.prompt(second, [self.step("workspace_write", {"content": args["content"], "path": str(self.work / "proof.txt")})])
+        self.assertEqual(self.descriptor(second), one)
+        self.assertNotEqual(first.session, second.session)
+        self.assertNotEqual(first.callbacks[0]["params"]["toolCall"]["toolCallId"], second.callbacks[0]["params"]["toolCall"]["toolCallId"])
+        self.assertFalse((self.work / "proof.txt").exists(), "A previous allow must not become Runtime authority")
+        for private in [args["content"], str(self.work), first.session]:
+            self.assertNotIn(private, json.dumps(one))
+
+    def test_changed_content_path_working_folder_grants_and_limits_do_not_match(self):
+        args = {"path": "proof.txt", "content": "body"}
+        first = self.client()
+        self.prompt(first, [self.step("workspace_write", args)])
+        key = self.descriptor(first)["key"]
+        for changed in [{**args, "content": "different"}, {**args, "path": "other.txt"}]:
+            self.prompt(first, [self.step("workspace_write", changed)])
+            self.assertNotEqual(self.descriptor(first)["key"], key)
+        child = self.work / "child"
+        child.mkdir()
+        for client in [self.client(cwd=child), self.client(additional=[child])]:
+            self.prompt(client, [self.step("workspace_write", args)])
+            self.assertNotEqual(self.descriptor(client)["key"], key)
+        path = self.home / "runtime.json"
+        config = json.loads(path.read_text())
+        config["limits"]["max_tool_calls"] += 1
+        path.write_text(json.dumps(config))
+        changed = self.client()
+        self.prompt(changed, [self.step("workspace_write", args)])
+        self.assertNotEqual(self.descriptor(changed)["key"], key)
+
+    def test_legacy_and_unsupported_negotiation_have_original_wire_and_authority(self):
+        for negotiation in [False, {}, {"version": 2, "owner": "instance", "instanceId": str(uuid.uuid4())},
+                            {"version": 1, "owner": "engine", "instanceId": str(uuid.uuid4())},
+                            {"version": 1, "owner": "instance", "instanceId": "uninstalled"}]:
+            with self.subTest(negotiation=negotiation):
+                client = self.client(negotiation=negotiation)
+                self.assertNotIn(POLICY_META, client.initialized.get("_meta", {}))
+                self.prompt(client, [self.step("workspace_write", {"path": "once.txt", "content": "once"})], approve=True)
+                call = client.callbacks[0]["params"]["toolCall"]
+                self.assertNotIn(POLICY_META, call["_meta"])
+                self.assertEqual((self.work / "once.txt").read_text(), "once")
+
+    def test_mcp_key_binds_actual_endpoint_and_credentials_but_not_server_label(self):
+        def server(label="same", endpoint=None, secret="first"):
+            return {"name": label, "type": "http", "url": endpoint or self.url + "/mcp",
+                    "headers": [{"name": "Authorization", "value": "Bearer " + secret}]}
+        keys = []
+        for spec in [server(), server(label="renamed"), server(secret="second")]:
+            client = self.client(servers=[spec])
+            self.prompt(client, [self.step("@mcp", {"private": "data"})], approve=True)
+            descriptor = self.descriptor(client)
+            keys.append(descriptor["key"])
+            for private in ["Bearer", "first", "second", self.url, '"private"']:
+                self.assertNotIn(private, json.dumps(descriptor))
+        self.assertEqual(keys[0], keys[1])
+        self.assertNotEqual(keys[0], keys[2])
+        self.server.mcp_schema = {"type": "object", "properties": {"private": {"type": "string"}}}
+        client = self.client(servers=[server()])
+        self.prompt(client, [self.step("@mcp", {"private": "data"})], approve=True)
+        self.assertNotEqual(self.descriptor(client)["key"], keys[0])
+        self.server.mcp_schema = {"type": "object"}
+        self.server.mcp_protocol = "2025-03-26"
+        client = self.client(servers=[server()])
+        self.prompt(client, [self.step("@mcp", {"private": "data"})], approve=True)
+        self.assertNotEqual(self.descriptor(client)["key"], keys[0])
+        other = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        other.effects = []
+        threading.Thread(target=other.serve_forever, daemon=True).start()
+        try:
+            client = self.client(servers=[server(endpoint=f"http://127.0.0.1:{other.server_port}/mcp")])
+            self.prompt(client, [self.step("@mcp", {"private": "data"})], approve=True)
+            self.assertNotEqual(self.descriptor(client)["key"], keys[0])
+            self.assertEqual(len(other.effects), 1)
+        finally:
+            other.shutdown()
+            other.server_close()
+        self.assertEqual(len(self.server.effects), 5)
+
+    def test_host_only_always_option_is_not_new_engine_authority(self):
+        client = self.client()
+        label = "unoffered-option"
+        self.server.programs[label] = [self.step("workspace_write", {"path": "never.txt", "content": "never"})]
+        request = client.request("session/prompt", {"sessionId": client.session,
+                                  "prompt": [{"type": "text", "text": label}]})
+        while True:
+            frame = client.q.get(timeout=15)
+            if frame.get("method") == "session/request_permission":
+                break
+            self.assertIn("method", frame)
+            client.updates.append(frame)
+        client.callbacks.append(frame)
+        self.descriptor(client)
+        self.assertEqual([option["optionId"] for option in frame["params"]["options"]], ["allow_once", "reject_once"])
+        client.send({"jsonrpc": "2.0", "id": frame["id"], "result": {
+            "outcome": {"outcome": "selected", "optionId": "allow_always"}}})
+        self.assertIn("result", client.finish(request))
+        self.assertFalse((self.work / "never.txt").exists())
+
+    def test_negotiation_does_not_bypass_builtin_schema_or_read_only(self):
+        client = self.client()
+        self.prompt(client, [self.step("workspace_write", {"path": "no.txt", "content": "no",
+                    "_meta": {POLICY_META: {"key": "0" * 64}}})], approve=True)
+        self.assertFalse(client.callbacks)
+        self.assertFalse((self.work / "no.txt").exists())
+        self.assertIn("result", client.call("session/set_mode", {"sessionId": client.session, "modeId": "read_only"}))
+        self.prompt(client, [self.step("workspace_write", {"path": "no.txt", "content": "no"})], approve=True)
+        self.assertFalse(client.callbacks)
+        self.assertFalse((self.work / "no.txt").exists())
+
+    def test_negotiation_and_auto_allow_replies_do_not_expand_tool_budget(self):
+        path = self.home / "runtime.json"
+        config = json.loads(path.read_text())
+        config["limits"]["max_tool_calls"] = 1
+        path.write_text(json.dumps(config))
+        client = self.client()
+        _, result = self.prompt(client, [
+            self.step("workspace_write", {"path": "first.txt", "content": "first"}),
+            self.step("workspace_write", {"path": "second.txt", "content": "second"})], approve=True)
+        self.assertEqual(result["result"]["_meta"]["io.github.bkrabach.agent-runtime"]["stopCause"], "tool_call_budget")
+        self.assertEqual(len(client.callbacks), 1)
+        self.descriptor(client)
+        self.assertEqual((self.work / "first.txt").read_text(), "first")
+        self.assertFalse((self.work / "second.txt").exists())
 
 
 if __name__ == "__main__":

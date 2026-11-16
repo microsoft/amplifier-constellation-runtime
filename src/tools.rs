@@ -170,7 +170,7 @@ pub fn mutation(name: &str) -> bool {
         "workspace_write" | "workspace_run" | "workspace_save_artifact"
     )
 }
-fn relative(c: &Config, cwd: &Path, input: &str) -> Result<(PathBuf, PathBuf)> {
+pub(crate) fn relative(c: &Config, cwd: &Path, input: &str) -> Result<(PathBuf, PathBuf)> {
     let roots = c.effective_roots()?;
     let path = Path::new(input);
     ensure!(

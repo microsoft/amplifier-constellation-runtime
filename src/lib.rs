@@ -1,3 +1,4 @@
+pub mod approval_policy;
 pub mod assessment;
 pub mod capabilities;
 pub mod chatgpt;

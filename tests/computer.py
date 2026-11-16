@@ -40,8 +40,10 @@ class Tests(unittest.TestCase):
  def tearDown(self):
   for c in self.clients:c.close()
   self.server.shutdown();self.server.server_close();self.tmp.cleanup()
- def client(self,sid=None):
-  c=Client(self.home);self.clients.append(c);c.call('initialize',{'protocolVersion':1,'clientCapabilities':{}});p={'cwd':str(self.work),'mcpServers':[{'name':'browser','type':'http','url':self.url+'/mcp','headers':[]}]}
+ def client(self,sid=None,hosted=False):
+  c=Client(self.home);self.clients.append(c);initialize={'protocolVersion':1,'clientCapabilities':{}}
+  if hosted:initialize['_meta']={'com.microsoft.amplifier.approval-policy':{'version':1,'owner':'instance','instanceId':'5c910f4d-8e18-4bb4-b55c-877a1bb36373'}}
+  c.call('initialize',initialize);p={'cwd':str(self.work),'mcpServers':[{'name':'browser','type':'http','url':self.url+'/mcp','headers':[]}]}
   if sid:p['sessionId']=sid
   r=c.call('session/load' if sid else 'session/new',p);return c,r['result'].get('sessionId',sid)
  def prompt(self,c,sid,text='operate',approve=False):return c.call('session/prompt',{'sessionId':sid,'prompt':[{'type':'text','text':text}]},approve=approve)
@@ -57,6 +59,20 @@ class Tests(unittest.TestCase):
   self.assertEqual(len([u for u in replay if u['sessionUpdate']=='tool_call']),1)
   results=[u for u in replay if u['sessionUpdate']=='tool_call_update'];self.assertEqual(len(results),1);self.assertEqual(results[0]['status'],'completed');self.assertEqual(results[0]['content'][0]['content']['data'],png());self.assertEqual(c.callbacks,[]);self.assertEqual(self.server.effects,1)
   self.prompt(c,sid,'after restart');self.assertEqual(self.server.effects,1)
+ def test_hosted_scope_keeps_computer_authority_request_local_and_binds_environment(self):
+  meta='com.microsoft.amplifier.approval-policy';scopes=[]
+  for approved in (True,False):
+   c,sid=self.client(hosted=True);self.prompt(c,sid,approve=approved)
+   self.assertEqual(len(c.callbacks),1)
+   scopes.append(c.callbacks[0]['params']['toolCall']['_meta'][meta])
+  self.assertEqual(scopes[0],scopes[1]);self.assertEqual(self.server.effects,1)
+  self.assertEqual(scopes[0]['authorityLifetime'],'request')
+  path=self.home/'runtime.json';config=json.loads(path.read_text());config['provider']['native']['computer']['display_width']=128;path.write_text(json.dumps(config))
+  c,sid=self.client(hosted=True);self.prompt(c,sid)
+  self.assertNotEqual(c.callbacks[0]['params']['toolCall']['_meta'][meta]['key'],scopes[0]['key'])
+  self.assertEqual(self.server.effects,1)
+  c.call('session/set_mode',{'sessionId':sid,'modeId':'read_only'});before=len(c.callbacks)
+  self.prompt(c,sid,approve=True);self.assertEqual(len(c.callbacks),before);self.assertEqual(self.server.effects,1)
  def test_denial_and_failed_screenshot_are_not_replayed(self):
   for authorized in [False,True]:
    self.server.fail=authorized;c,sid=self.client();before=self.server.effects;r=self.prompt(c,sid,approve=authorized);self.assertIn('result',r);self.assertEqual(self.server.effects-before,int(authorized))
