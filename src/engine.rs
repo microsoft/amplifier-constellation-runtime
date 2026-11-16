@@ -644,10 +644,24 @@ impl Turn<'_> {
                 ensure!(arguments.len() <= 1024 * 1024, "Tool input exceeds limit");
                 let args: Value =
                     serde_json::from_str(arguments).context("Invalid tool arguments")?;
-                let definition = definitions
-                    .iter()
-                    .find(|d| d["name"] == name)
-                    .context("Provider requested a tool that was not offered")?;
+                let Some(definition) = definitions.iter().find(|d| d["name"] == name) else {
+                    // The model asked for a name this session does not list,
+                    // usually a tool's own name without the prefix it is
+                    // listed under. Nothing is announced, authorized or run.
+                    // A normal failed result lets the model call the listed
+                    // name within its existing turn and call budgets.
+                    let output =
+                        json!({"error":crate::tool_identity::unlisted(name, &definitions)});
+                    self.session.items.push(json!({"type":"function_call_output","call_id":call_id,"output":output.to_string(),"_acp_content":[],"_tool_images":[]}));
+                    self.store.save(&self.session)?;
+                    self.store.event(
+                        &self.session.id,
+                        Some(turn),
+                        "tool.unlisted",
+                        json!({"call_id":call_id}),
+                    )?;
+                    continue;
+                };
                 let is_mcp = self.mcp.tools.get(name);
                 // Enforce the offered model-facing builtin schema before
                 // permission or effects. MCP arguments remain the server's

@@ -40,7 +40,10 @@ The existing MCP `rawInput` envelope remains `{server,tool,arguments}`. Builtin
 `rawInput` remains the supplied arguments; the engine validates them against the
 offered builtin schema before requesting approval or performing effects. Invalid
 arguments produce a failed tool result so the model can correct them within its
-existing budgets. Free-form data remains free where the schema allows it; this
+existing budgets. A request for a name the session does not list is answered the
+same way, with no announcement and no permission request: the result names any
+listed tool that differs only by its `mcp_<index>_` prefix, never the requested
+name, and the engine does not resolve the name itself. Free-form data remains free where the schema allows it; this
 does not impose Runtime's builtin schema restrictions on MCP tools. Session modes,
 workspace boundaries and endpoint-specific MCP authorization are unchanged.
 
