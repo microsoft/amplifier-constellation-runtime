@@ -62,13 +62,23 @@ impl Peer {
     pub async fn permission(
         &self,
         sid: &str,
-        call: &str,
-        title: &str,
-        input: &Value,
+        tool_call: &Value,
         cancel: &CancellationToken,
     ) -> Result<()> {
-        let result=self.call("session/request_permission",json!({"sessionId":sid,"toolCall":{"toolCallId":call,"title":title,"kind":"other","status":"pending","rawInput":input},"options":[{"optionId":"allow_once","name":"Allow once","kind":"allow_once"},{"optionId":"reject_once","name":"Decline","kind":"reject_once"}]}),cancel).await?;
+        // Reuse the engine-authored announcement, including its resolved identity.
+        // Arguments and display text never supply identity. The request's own
+        // kind stays "other", as in every earlier version: existing clients
+        // match on it, and it carries no authority.
+        let mut tool_call = tool_call.clone();
+        tool_call["kind"] = json!("other");
+        let result=self.call("session/request_permission",json!({"sessionId":sid,"toolCall":tool_call,"options":[{"optionId":"allow_once","name":"Allow once","kind":"allow_once"},{"optionId":"reject_once","name":"Decline","kind":"reject_once"}]}),cancel).await?;
         permission_result(&result)
+    }
+
+    pub async fn announce_tool(&self, sid: &str, tool_call: &Value) -> Result<()> {
+        let mut update = tool_call.clone();
+        update["sessionUpdate"] = json!("tool_call");
+        self.update(sid, update).await
     }
 }
 

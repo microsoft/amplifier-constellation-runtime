@@ -23,6 +23,8 @@ pub mod server;
 pub mod steering;
 pub mod store;
 pub mod task_bounds;
+pub(crate) mod tool_identity;
+pub(crate) mod tool_schema;
 pub mod tools;
 pub mod watches;
 
