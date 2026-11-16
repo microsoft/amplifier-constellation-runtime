@@ -418,7 +418,11 @@ async fn windows_cancellation_and_timeout_end_descendants() {
     for cancel in [true, false] {
         let (_temp, mut c, args) = setup();
         if !cancel {
-            c.limits.command_seconds = 1;
+            // This case must reach a running descendant before its deadline.
+            // The same command budget includes AppContainer preparation, so
+            // one second can expire before this fixture reaches that boundary.
+            // Preparation-time expiry is covered by the before-resume unit test.
+            c.limits.command_seconds = 10;
         }
         std::fs::write(
             c.workspace.join("command-probe.json"),
@@ -439,7 +443,12 @@ async fn windows_cancellation_and_timeout_end_descendants() {
             task.abort();
             let _ = task.await;
         } else {
-            assert!(task.await.unwrap().is_err());
+            let failure = task.await.unwrap().unwrap_err();
+            assert!(
+                format!("{failure:#}")
+                    .contains("Command timed out; inspect workspace effects before retrying"),
+                "Expected the running command deadline, got {failure:#}"
+            );
         }
         std::fs::write(work.join("release"), "go").unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
