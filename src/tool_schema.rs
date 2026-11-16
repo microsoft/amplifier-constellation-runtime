@@ -106,9 +106,12 @@ fn validate(schema: &Value, value: &Value) -> Result<()> {
     if let Some(object) = value.as_object() {
         if let Some(required) = schema.get("required").and_then(Value::as_array) {
             for field in required {
+                let field = field.as_str().expect("checked schema");
+                // The name comes from the offered schema, so the model can correct
+                // its call without any supplied text being repeated.
                 ensure!(
-                    object.contains_key(field.as_str().expect("checked schema")),
-                    "Built-in tool argument is missing a required field"
+                    object.contains_key(field),
+                    "Built-in tool argument is missing the required field `{field}`"
                 );
             }
         }
@@ -117,7 +120,22 @@ fn validate(schema: &Value, value: &Value) -> Result<()> {
             if let Some(property) = properties.and_then(|properties| properties.get(key)) {
                 validate(property, item)?;
             } else if let Some(additional) = schema.get("additionalProperties") {
-                // No supplied key or value is included in validation errors.
+                // No supplied key or value is included in validation errors; an
+                // undeclared key is answered with the fields the schema declares.
+                if additional == &Value::Bool(false) {
+                    let mut declared = properties
+                        .map(|properties| properties.keys().map(String::as_str).collect::<Vec<_>>())
+                        .unwrap_or_default();
+                    declared.sort_unstable();
+                    bail!(
+                        "Built-in tool argument is not permitted; fields declared here: {}",
+                        if declared.is_empty() {
+                            "none".to_owned()
+                        } else {
+                            declared.join(", ")
+                        }
+                    );
+                }
                 validate(additional, item)?;
             }
         }
@@ -329,6 +347,28 @@ mod tests {
             assert!(validate_builtin(&json!({"parameters":schema}), &json!({})).is_err());
         }
         assert!(validate_builtin(&json!({}), &json!({})).is_err());
+    }
+
+    #[test]
+    fn errors_name_only_what_the_offered_schema_declares() {
+        let definition = write_definition();
+        let error = validate_builtin(
+            &definition,
+            &json!({"path":"proof.txt","content":"value","SUPPLIED-KEY":"SUPPLIED-VALUE"}),
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            error,
+            "Built-in tool argument is not permitted; fields declared here: content, path"
+        );
+        let error = validate_builtin(&definition, &json!({"content":"SUPPLIED-VALUE"}))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "Built-in tool argument is missing the required field `path`"
+        );
     }
 
     #[test]
