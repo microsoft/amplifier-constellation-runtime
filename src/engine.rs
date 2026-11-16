@@ -560,12 +560,31 @@ impl Turn<'_> {
                     let input = json!({"environment":computer.mcp_server,"tool":computer.mcp_tool,"actions":args["actions"],"pending_safety_checks":call["pending_safety_checks"]});
                     // The native computer operation has additional safety
                     // semantics; it is not an ordinary MCP tool approval.
-                    let tool_call = crate::tool_identity::Identity::Builtin("computer").call(
+                    let mut tool_call = crate::tool_identity::Identity::Builtin("computer").call(
                         call_id,
                         "Control the configured computer environment",
                         "execute",
                         &input,
                     );
+                    if self
+                        .peer
+                        .instance_approval_policy
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                        && let Some(tool) = self.mcp.tools.get(alias)
+                    {
+                        crate::approval_policy::annotate_computer(
+                            &mut tool_call,
+                            crate::approval_policy::Context {
+                                config: self.config,
+                                mode: self.session.mode,
+                                cwd: &self.session.cwd,
+                                items: &self.session.items,
+                            },
+                            tool,
+                            &args,
+                            &call["pending_safety_checks"],
+                        );
+                    }
                     self.peer
                         .announce_tool(&self.session.id, &tool_call)
                         .await?;
@@ -704,7 +723,27 @@ impl Turn<'_> {
                 } else {
                     crate::tool_identity::Identity::Builtin(name)
                 };
-                let tool_call = identity.call(call_id, &title, kind, &permission_input);
+                let mut tool_call = identity.call(call_id, &title, kind, &permission_input);
+                if input_validation.is_ok()
+                    && mutating
+                    && self
+                        .peer
+                        .instance_approval_policy
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    crate::approval_policy::annotate(
+                        &mut tool_call,
+                        crate::approval_policy::Context {
+                            config: self.config,
+                            mode: self.session.mode,
+                            cwd: &self.session.cwd,
+                            items: &self.session.items,
+                        },
+                        definition,
+                        &args,
+                        is_mcp,
+                    );
+                }
                 self.peer
                     .announce_tool(&self.session.id, &tool_call)
                     .await?;

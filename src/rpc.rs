@@ -14,6 +14,7 @@ pub struct Peer {
     wire: amplifier_acp_connection::Sender,
     pub compaction_supported: Arc<AtomicBool>,
     pub message_completion_supported: Arc<AtomicBool>,
+    pub instance_approval_policy: Arc<AtomicBool>,
 }
 impl Peer {
     pub fn new(wire: amplifier_acp_connection::Sender) -> Self {
@@ -21,6 +22,7 @@ impl Peer {
             wire,
             compaction_supported: Arc::new(AtomicBool::new(false)),
             message_completion_supported: Arc::new(AtomicBool::new(false)),
+            instance_approval_policy: Arc::new(AtomicBool::new(false)),
         }
     }
     pub async fn send(&self, value: Value) -> Result<()> {

@@ -31,6 +31,27 @@ class Tests(unittest.TestCase):
             self.prompt(c,sid,'what happened')
             self.assertIn('saved history includes write proof',json.dumps(c.updates))
         finally:c.close()
+    def test_hosted_approval_scope_uses_same_rust_boundary_and_never_caches_a_grant(self):
+        import uuid
+        meta='com.microsoft.amplifier.approval-policy'
+        scopes=[]
+        for approve in (True,False):
+            c=protocol.Client(self.home)
+            try:
+                initialized=c.call('initialize',{'protocolVersion':1,'clientCapabilities':{},'_meta':{meta:{'version':1,'owner':'instance','instanceId':str(uuid.uuid4())}}})['result']
+                self.assertEqual(initialized['_meta'][meta]['producer'],'microsoft.amplifier-constellation-runtime')
+                sid=self.new(c)
+                result=self.prompt(c,sid,'write proof',approve=approve)
+                self.assertEqual(result['result']['stopReason'],'end_turn')
+                self.assertEqual(len(c.callbacks),1)
+                call=c.callbacks[0]['params']['toolCall']
+                scopes.append(call['_meta'][meta])
+                self.assertEqual(call['_meta']['com.microsoft.amplifier.tool'],{'version':1,'kind':'builtin','name':'workspace_write'})
+                self.assertEqual((self.work/'proof.txt').exists(),approve)
+                if approve:(self.work/'proof.txt').unlink()
+            finally:c.close()
+        self.assertEqual(scopes[0],scopes[1])
+        self.assertEqual(scopes[0]['authorityLifetime'],'request')
     def sequence(self,c,sid,calls,**kwargs):
         program={'calls':calls,**kwargs.pop('program',{})}
         return self.prompt(c,sid,'sequence:'+json.dumps(program),**kwargs)

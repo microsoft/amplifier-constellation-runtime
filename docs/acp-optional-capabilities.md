@@ -47,6 +47,65 @@ name, and the engine does not resolve the name itself. Free-form data remains fr
 does not impose Runtime's builtin schema restrictions on MCP tools. Session modes,
 workspace boundaries and endpoint-specific MCP authorization are unchanged.
 
+## Optional host-owned approval rules
+
+An installed Agent Instance may negotiate `com.microsoft.amplifier.approval-policy`
+version 1 in the initialize request's `_meta`:
+
+```json
+{"com.microsoft.amplifier.approval-policy":{"version":1,"owner":"instance","instanceId":"5c910f4d-8e18-4bb4-b55c-877a1bb36373"}}
+```
+
+Runtime replies in initialize result `_meta` with the same namespace and
+`{"version":1,"owner":"instance","producer":"microsoft.amplifier-constellation-runtime","reusableRequests":true}`.
+Absent, unsupported or malformed negotiation leaves the earlier wire behavior
+unchanged. This is an agreement with the selected, authenticated installation
+host; a UUID or a peer's advertised capability is not independent proof of trust.
+
+For a supported live execution request, Runtime adds the same descriptor to
+the tool announcement and permission request at `toolCall._meta` under that
+namespace. The descriptor contains `version`, the negotiated `producer`, a
+lowercase SHA-256 `key`, a bounded `description`, `allowOptionId:"allow_once"`
+and `authorityLifetime:"request"`. Instance may offer its own revocable
+“Always allow this” rule and answer each matching current request with that
+request's existing Allow once option. Runtime never stores or reuses a grant.
+
+The initial matching scope is deliberately exact: the resolved tool and input
+schema, exact arguments (including written content or command arguments),
+working folder, current granted roots, permission mode and execution limits.
+File aliases resolve through the existing resource path resolver. Saving
+`artifact:"latest"` binds the actual saved artifact bytes, not the word
+“latest”. Changing those bytes asks again. A current MCP connection binds the
+actual URL and effective headers, configured extra TLS trust and negotiated MCP
+protocol, or the actual stdio command, arguments, explicit environment and
+working folder. The key binds the original MCP tool name and schema; server
+labels, registry aliases and display prose do not define authority. Native
+computer requests additionally bind their configured environment and exact
+actions and safety checks. To identify a rule when reviewing or revoking it, the
+description includes only a bounded relative target path, command executable
+basename or registered MCP tool name. It omits absolute workspace paths,
+written content, command arguments, endpoints and credentials. Descriptions
+are plain display text, never matching authority; the complete scope is bound
+by its domain-separated digest.
+
+Keys do not include chat, call or Instance IDs, so the host can remember the
+same scope across its agent's chats. The host must also bind rules to its
+selected trusted engine, current caller/delegation and installation policy.
+An engine's key is not portable authorization for another agent. The digest
+describes the configured action, not a filesystem lease, remote server
+immutability or a promise that a command's effect cannot change over time.
+Unsupported or unresolved scopes offer the original one-time choices only.
+
+Schema validation, read-only mode, workspace and OS boundaries, command-network
+policy, tool/model budgets and cancellation remain enforced. The selected
+engine still accepts only the current `allow_once`; a host-only Always option
+must be translated, never forwarded as new engine authority. Later revocation
+affects future requests and does not undo an already accepted action. All
+official provider backends, including Copilot, use this same Rust permission
+boundary; Copilot SDK tool hooks remain deny-only. These additions do not add
+an engine policy store, an automatic-approval mode or a shared provisioning
+service.
+
 ## Session model and reasoning choices
 
 The standard `session/set_config_option` method accepts `model` (category

@@ -88,6 +88,7 @@ pub struct Tool {
     pub definition: Value,
     pub readonly: bool,
     pub endpoint: Option<String>,
+    pub(crate) approval_binding: Option<String>,
     index: usize,
 }
 
@@ -117,11 +118,13 @@ enum Transport {
         headers: reqwest::header::HeaderMap,
         session: Option<String>,
         protocol: String,
+        approval_binding: String,
     },
     Stdio {
         child: Box<Child>,
         input: ChildStdin,
         output: BufReader<ChildStdout>,
+        approval_binding: Option<String>,
         #[cfg(unix)]
         pid: u32,
     },
@@ -174,6 +177,17 @@ impl Tools {
                     );
                     *protocol = version.into();
                 }
+                let approval_binding = peer
+                    .transport
+                    .as_ref()
+                    .and_then(Transport::approval_binding)
+                    .map(|binding| {
+                        crate::approval_policy::digest(
+                            "mcp-protocol",
+                            &json!({
+                        "connection":binding,"protocol":init["protocolVersion"]}),
+                        )
+                    });
                 peer.notify("notifications/initialized", json!({})).await?;
                 let mut cursor = Value::Null;
                 for _ in 0..8 {
@@ -215,6 +229,7 @@ impl Tools {
                                 } else {
                                     None
                                 },
+                                approval_binding: approval_binding.clone(),
                                 index,
                             },
                         );
@@ -359,6 +374,16 @@ impl Connection {
 }
 
 impl Transport {
+    fn approval_binding(&self) -> Option<&str> {
+        match self {
+            Self::Http {
+                approval_binding, ..
+            } => Some(approval_binding),
+            Self::Stdio {
+                approval_binding, ..
+            } => approval_binding.as_deref(),
+        }
+    }
     async fn open(spec: &Value) -> Result<Self> {
         if spec["type"] == "http" {
             let url = spec["url"].as_str().context("MCP URL required")?;
@@ -398,10 +423,12 @@ impl Transport {
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(120))
                 .connect_timeout(Duration::from_secs(10));
+            let mut extra_ca = Value::Null;
             if parsed.scheme() == "https"
                 && let Some(path) = std::env::var_os("SSL_CERT_FILE")
             {
                 let pem = std::fs::read(path).context("Read SSL_CERT_FILE for HTTPS MCP")?;
+                extra_ca = json!(crate::approval_policy::digest("mcp-ca", &json!(pem)));
                 let certificates = reqwest::Certificate::from_pem_bundle(&pem)
                     .context("Parse SSL_CERT_FILE for HTTPS MCP")?;
                 ensure!(
@@ -413,12 +440,16 @@ impl Transport {
                 }
             }
             let client = builder.build()?;
+            // Digest the actual configured transport and effective headers,
+            // including credential binding; never expose their values in metadata.
+            let approval_binding = http_approval_binding(parsed.as_str(), &headers, &extra_ca);
             Ok(Self::Http {
                 client,
                 url: url.into(),
                 headers,
                 session: None,
                 protocol: "2025-06-18".into(),
+                approval_binding,
             })
         } else {
             ensure!(
@@ -450,6 +481,7 @@ impl Transport {
             }
             #[cfg(unix)]
             cmd.process_group(0);
+            let approval_binding = stdio_approval_binding(cmd.as_std());
             let mut child = cmd.spawn().context("MCP server could not start")?;
             #[cfg(unix)]
             let pid = child.id().context("MCP server exited")?;
@@ -457,6 +489,7 @@ impl Transport {
                 input: child.stdin.take().unwrap(),
                 output: BufReader::new(child.stdout.take().unwrap()),
                 child: Box::new(child),
+                approval_binding,
                 #[cfg(unix)]
                 pid,
             })
@@ -551,6 +584,43 @@ impl Transport {
     }
 }
 
+/// Bind the actual configured command, arguments, explicit environment and cwd.
+/// Non-UTF8 inputs cannot be represented without loss and therefore offer Once
+/// only. No executable is reopened and no additional process is launched.
+fn stdio_approval_binding(command: &std::process::Command) -> Option<String> {
+    let program = command.get_program().to_str()?;
+    let args = command
+        .get_args()
+        .map(|arg| arg.to_str())
+        .collect::<Option<Vec<_>>>()?;
+    let environment = command
+        .get_envs()
+        .map(|(key, value)| Some((key.to_str()?, value?.to_str()?)))
+        .collect::<Option<std::collections::BTreeMap<_, _>>>()?;
+    let cwd = std::env::current_dir().ok()?;
+    let cwd = command.get_current_dir().unwrap_or(&cwd).to_str()?;
+    Some(crate::approval_policy::digest(
+        "mcp-stdio",
+        &json!({
+        "command":program,"args":args,"environment":environment,"cwd":cwd}),
+    ))
+}
+
+fn http_approval_binding(
+    url: &str,
+    headers: &reqwest::header::HeaderMap,
+    extra_ca: &Value,
+) -> String {
+    let headers: std::collections::BTreeMap<_, _> = headers
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_bytes()))
+        .collect();
+    crate::approval_policy::digest(
+        "mcp-http",
+        &json!({"url":url,"headers":headers,"extraCa":extra_ca}),
+    )
+}
+
 async fn read_mcp_frame<R: tokio::io::AsyncBufRead + Unpin>(r: &mut R) -> Result<Option<Value>> {
     use tokio::io::AsyncBufReadExt;
     let mut bytes = Vec::new();
@@ -573,4 +643,74 @@ async fn read_mcp_frame<R: tokio::io::AsyncBufRead + Unpin>(r: &mut R) -> Result
         }
     }
     Ok(Some(serde_json::from_slice(&bytes)?))
+}
+
+#[cfg(test)]
+mod approval_binding_tests {
+    use super::*;
+
+    #[test]
+    fn http_binding_tracks_effective_credentials_url_and_loaded_trust_without_exposing_values() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("authorization", "Bearer secret-one".parse().unwrap());
+        let ca = json!(crate::approval_policy::digest(
+            "mcp-ca",
+            &json!(b"private fixture certificate")
+        ));
+        let first = http_approval_binding("https://fixture.invalid/mcp", &headers, &ca);
+        assert_eq!(first.len(), 64);
+        assert!(!first.contains("secret-one"));
+        assert_ne!(
+            first,
+            http_approval_binding("https://other.invalid/mcp", &headers, &ca)
+        );
+        assert_ne!(
+            first,
+            http_approval_binding("https://fixture.invalid/mcp", &headers, &Value::Null)
+        );
+        assert_ne!(
+            first,
+            http_approval_binding(
+                "https://fixture.invalid/mcp",
+                &headers,
+                &json!(crate::approval_policy::digest(
+                    "mcp-ca",
+                    &json!(b"changed fixture certificate")
+                ))
+            )
+        );
+        headers.insert("authorization", "Bearer secret-two".parse().unwrap());
+        assert_ne!(
+            first,
+            http_approval_binding("https://fixture.invalid/mcp", &headers, &ca)
+        );
+    }
+
+    #[test]
+    fn stdio_binding_tracks_actual_argv_path_environment_and_cwd() {
+        let mut command = std::process::Command::new("server");
+        command
+            .env_clear()
+            .arg("one")
+            .env("PATH", "/first")
+            .env("TOKEN", "private-token");
+        let first = stdio_approval_binding(&command).unwrap();
+        command.env("PATH", "/second");
+        assert_ne!(Some(first.clone()), stdio_approval_binding(&command));
+        command.env("PATH", "/first").arg("two");
+        assert_ne!(Some(first.clone()), stdio_approval_binding(&command));
+        let mut equivalent = std::process::Command::new("server");
+        equivalent
+            .env_clear()
+            .arg("one")
+            .env("TOKEN", "private-token")
+            .env("PATH", "/first");
+        assert_eq!(Some(first.clone()), stdio_approval_binding(&equivalent));
+        equivalent.env("TOKEN", "changed-token");
+        assert_ne!(Some(first.clone()), stdio_approval_binding(&equivalent));
+        equivalent
+            .env("TOKEN", "private-token")
+            .current_dir("different");
+        assert_ne!(Some(first), stdio_approval_binding(&equivalent));
+    }
 }
