@@ -27,6 +27,10 @@ class Handler(ResponsesWebSocketMixin,BaseHTTPRequestHandler):
             window=getattr(self.server,'mcp_window',None)
             return self.reply({'output':window if window is not None else [{'role':'user','content':retained},{'type':'compaction','encrypted_content':'PRIVATE_OPAQUE'}],'usage':{'input_tokens':14000,'output_tokens':200}})
         if body.get('compaction'):
+            last=body['messages'][-1]
+            if last['role']=='assistant' and last['content'][-1]['type'] in ('thinking','redacted_thinking'):
+                # The live service refuses this request shape with exactly this error.
+                return self.reply({'type':'error','error':{'type':'invalid_request_error','message':f"messages.{len(body['messages'])-1}: The final block in an assistant message cannot be `thinking`."}},400)
             if 'output_config' in body and not isinstance(body['output_config'],dict):
                 return self.reply({'error':{'type':'invalid_request_error','message':'output_config must be an object'}},400)
             self.send_response(200);self.send_header('Content-Type','text/event-stream');self.end_headers()
@@ -34,27 +38,34 @@ class Handler(ResponsesWebSocketMixin,BaseHTTPRequestHandler):
             if self.server.truncate:events=events[:-1]
             for event in events:self.wfile.write(('data: '+json.dumps(event)+'\n\n').encode())
             self.wfile.flush();return
+        hold,self.server.hold=self.server.hold,None
+        if hold:hold[0].set();hold[1].wait(10)
         self.send_response(200);self.send_header('Content-Type','text/event-stream');self.end_headers()
+        reported=self.server.reported_tokens
         if self.path=='/responses':
-            events=[{'type':'response.completed','response':{'status':'completed','output':[{'type':'message','role':'assistant','content':[{'type':'output_text','text':'Finished'}]}],'usage':{'input_tokens':400,'output_tokens':20,'input_tokens_details':{'cached_tokens':256}}}}]
+            events=[{'type':'response.completed','response':{'status':'completed','output':[{'type':'message','role':'assistant','content':[{'type':'output_text','text':'Finished'}]}],'usage':{'input_tokens':reported,'output_tokens':20,'input_tokens_details':{'cached_tokens':256}}}}]
         else:
-            events=[{'type':'message_start','message':{'usage':{'input_tokens':400,'output_tokens':0,'cache_read_input_tokens':256}}},{'type':'content_block_start','index':0,'content_block':{'type':'text','text':'Finished'}},{'type':'content_block_stop','index':0},{'type':'message_delta','delta':{'stop_reason':'end_turn'},'usage':{'output_tokens':20}},{'type':'message_stop'}]
+            # A reply with reasoning and no text is how a model stays silent.
+            block=[{'type':'content_block_start','index':0,'content_block':{'type':'thinking','thinking':'','signature':''}},{'type':'content_block_delta','index':0,'delta':{'type':'signature_delta','signature':'PRIVATE_REASONING_SIGNATURE'}}] if self.server.silent else [{'type':'content_block_start','index':0,'content_block':{'type':'text','text':'Finished'}}]
+            events=[{'type':'message_start','message':{'usage':{'input_tokens':reported,'output_tokens':0,'cache_read_input_tokens':256}}},*block,{'type':'content_block_stop','index':0},{'type':'message_delta','delta':{'stop_reason':'end_turn'},'usage':{'output_tokens':20}},{'type':'message_stop'}]
         for event in events:self.wfile.write(('data: '+json.dumps(event)+'\n\n').encode())
         self.wfile.flush()
 
 class Tests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.home=Path(self.tmp.name)/'home';self.work=Path(self.tmp.name)/'work';self.c=None
-        self.server=ThreadingHTTPServer(('127.0.0.1',0),Handler);self.server.requests=[];self.server.discovered=[];self.server.bad_compaction=False;self.server.truncate=False;self.server.retain_large_input=False;self.server.compact_error=False
+        self.server=ThreadingHTTPServer(('127.0.0.1',0),Handler);self.server.requests=[];self.server.discovered=[];self.server.bad_compaction=False;self.server.truncate=False;self.server.retain_large_input=False;self.server.compact_error=False;self.server.silent=False;self.server.reported_tokens=400;self.server.hold=None
         threading.Thread(target=self.server.serve_forever,daemon=True).start()
     def tearDown(self):
         if self.c:self.c.close()
         self.server.shutdown();self.server.server_close();self.tmp.cleanup()
-    def start(self,kind):
+    def start(self,kind,threshold=None):
         model='gpt-6.1-sol' if kind=='openai' else 'claude-opus-5-5'
         subprocess.run([str(protocol.BINARY),'--home',str(self.home),'init','--workspace',str(self.work),'--model',model],capture_output=True,check=True)
         p=self.home/'runtime.json';cfg=json.loads(p.read_text());cfg['provider'].update(kind=kind,model=model,endpoint=f'http://127.0.0.1:{self.server.server_port}/'+('responses' if kind=='openai' else 'messages'),api_key_env='RUNTIME_FIXTURE_KEY',reasoning_effort=None)
-        cfg['limits']['max_context_bytes']=64000;p.write_text(json.dumps(cfg))
+        cfg['limits']['max_context_bytes']=64000
+        if threshold:cfg['context']['compact_threshold_tokens']=threshold
+        p.write_text(json.dumps(cfg))
         self.c=protocol.Client(self.home);self.c.call('initialize',{'protocolVersion':1,'clientCapabilities':{}})
         self.sid=self.c.call('session/new',{'cwd':str(self.work),'mcpServers':[]})['result']['sessionId']
     def prompt(self,text):return self.c.call('session/prompt',{'sessionId':self.sid,'prompt':[{'type':'text','text':text}]})
@@ -180,5 +191,33 @@ class Tests(unittest.TestCase):
         with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:
             self.assertEqual(db.execute('SELECT count(*) FROM context_checkpoints').fetchone()[0],0)
             self.assertIn('Original',db.execute('SELECT items FROM sessions').fetchone()[0])
+
+    def test_summary_request_leaves_out_reasoning_that_ends_the_window(self):
+        # The model stays silent on one input while another is already waiting.
+        # Maintenance then runs on a window that ends on reasoning alone.
+        started=threading.Event();release=threading.Event()
+        self.server.silent=True;self.server.reported_tokens=5000;self.server.hold=(started,release)
+        self.start('anthropic',threshold=1024)
+        pid=self.c.request('session/prompt',{'sessionId':self.sid,'prompt':[{'type':'text','text':'Overheard: first line'}]})
+        self.assertTrue(started.wait(5))
+        waiting=self.c.call('_session/steering',{'sessionId':self.sid,'prompt':[{'type':'text','text':'Overheard: second line'}],'_meta':{'steering':{'inputId':'second-line','idleBehavior':'promptRequired'}}})
+        self.assertEqual(waiting['result']['outcome'],'injected')
+        release.set();self.assertEqual(self.c.finish(pid)['result']['stopReason'],'end_turn')
+        sent=[b for p,b in self.server.requests if p=='/messages']
+        self.assertEqual([bool(b.get('compaction')) for b in sent],[False,True,False])
+        self.assertEqual([m['role'] for m in sent[1]['messages']],['user'])
+        self.assertIn('first line',json.dumps(sent[1]['messages']))
+        self.assertNotIn('second line',json.dumps(sent[1]['messages']),'An input not yet accepted is not summary source')
+        self.assertEqual(sent[2]['messages'][0],{'role':'assistant','content':[{'type':'compaction','content':'PRIVATE_SUMMARY','signature':'PRIVATE_SIGNATURE'}]})
+        self.assertIn('second line',json.dumps(sent[2]['messages'][1]))
+        with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:
+            saved=json.loads(db.execute('SELECT items FROM sessions WHERE id=?',(self.sid,)).fetchone()[0])
+            kinds=[r[0] for r in db.execute('SELECT kind FROM events')]
+            self.assertEqual(db.execute('SELECT state,recorded FROM turn_inputs').fetchall(),[('incorporated',1)])
+            self.assertEqual(db.execute('SELECT count(*) FROM context_checkpoints').fetchone()[0],1)
+        # Saved history keeps the reply exactly as the provider returned it.
+        self.assertEqual(saved[1]['message']['content'],[{'type':'thinking','thinking':'','signature':'PRIVATE_REASONING_SIGNATURE'}])
+        self.assertNotIn('context.compaction.failed',kinds)
+        self.assertNotIn('PRIVATE_REASONING_SIGNATURE',json.dumps(self.c.updates))
 
 if __name__=='__main__':unittest.main()
