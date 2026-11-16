@@ -153,11 +153,13 @@ pub async fn complete(
                 let id = item["call_id"]
                     .as_str()
                     .context("Missing Copilot call ID")?;
+                let name = item["name"].as_str().context("Missing Copilot tool name")?;
+                // The engine resolves names and records unlisted calls as
+                // failed results. Keep malformed responses out of that path;
+                // SDK capture itself never grants tool execution authority.
                 ensure!(
-                    !id.is_empty()
-                        && ids.insert(id)
-                        && tools.iter().any(|t| t["name"] == item["name"]),
-                    "Invalid, duplicated, or unadvertised Copilot tool call"
+                    !id.is_empty() && ids.insert(id) && !name.is_empty(),
+                    "Invalid or duplicated Copilot tool call"
                 );
                 let arguments: Value = serde_json::from_str(
                     item["arguments"]

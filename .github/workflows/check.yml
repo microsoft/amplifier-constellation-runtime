@@ -119,6 +119,7 @@ jobs:
           python tests/helper_bounds.py
           python tests/protocol.py
           python tests/tool_permissions.py
+          python tests/copilot_protocol.py
           python tests/mcp_tls.py
           python tests/provider_identity.py
           python tests/windows_protocol.py

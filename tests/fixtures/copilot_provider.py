@@ -16,6 +16,23 @@ elif text=='write proof' and messages[-1].get('type')!='function_call_output':
     output=[{'type':'function_call','call_id':'write-call','name':'workspace_write','arguments':json.dumps({'path':'proof.txt','content':'verified'})}]
 elif text=='unadvertised':
     output=[{'type':'function_call','call_id':'bad','name':'bash','arguments':'{}'}]
+elif text.startswith('sequence:'):
+    program=json.loads(text.removeprefix('sequence:'))
+    last_user=max(i for i,item in enumerate(messages) if item.get('role')=='user')
+    results=[item for item in messages[last_user+1:] if item.get('type')=='function_call_output']
+    index=len(results)
+    calls=program['calls']
+    if index<len(calls) or program.get('repeat'):
+        call=calls[index % len(calls)].copy()
+        if call.get('name')=='@mcp':
+            call['name']=next(tool['name'] for tool in request['tools'] if tool['name'].startswith('mcp_'))
+        output=[{'type':'function_call','call_id':f'call-{index}',**call}]
+        if program.get('duplicate'):
+            output.append(output[0].copy())
+    else:
+        # The final reply proves Rust returned the correlated results to the
+        # next model step, rather than merely recording a failed call locally.
+        output=[{'type':'message','role':'assistant','content':[{'type':'output_text','text':json.dumps(results)}]}]
 else:
     output=[{'type':'message','role':'assistant','content':[{'type':'output_text','text':'saved history includes write proof' if any('write proof' in json.dumps(m) for m in messages) else 'complete'}]}]
 print(json.dumps({'protocol_version':1,'status':'completed','output':output,'usage':{},'sdk_tools_executed':False}))
