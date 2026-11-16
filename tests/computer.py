@@ -49,7 +49,8 @@ class Tests(unittest.TestCase):
   c,sid=self.client();r=self.prompt(c,sid,approve=True);self.assertIn('result',r);self.assertEqual(self.server.effects,1);self.assertEqual(len(c.callbacks),1);self.assertIn('pending_safety_checks',str(c.callbacks))
   permission=c.callbacks[0]['params']['toolCall'];announced=next(u['params']['update'] for u in c.updates if u.get('method')=='session/update' and u['params']['update'].get('sessionUpdate')=='tool_call')
   self.assertEqual(permission['_meta']['com.microsoft.amplifier.tool'],{'version':1,'kind':'builtin','name':'computer'})
-  self.assertEqual(permission,{k:v for k,v in announced.items() if k!='sessionUpdate'})
+  self.assertEqual((permission['kind'],announced['kind']),('other','execute'))
+  self.assertEqual({**permission,'kind':announced['kind']},{k:v for k,v in announced.items() if k!='sessionUpdate'})
   result=next(v for v in self.server.inputs[-1] if v.get('type')=='computer_call_output');self.assertEqual(result['acknowledged_safety_checks'][0]['id'],'check-1');self.assertEqual(result['output']['type'],'computer_screenshot')
   c.close();self.clients.remove(c);c,_=self.client(sid)
   replay=[u['params']['update'] for u in c.updates if u.get('method')=='session/update']

@@ -24,8 +24,9 @@ on the preceding `session/update` tool-call announcement and on
 
 `server` is present only for MCP. Identity comes from the resolved engine tool
 registry, never from model arguments. The enclosing `sessionId` and `toolCallId`
-bind it to that active call. The permission snapshot also preserves the announced
-title, ACP kind and raw input. Native computer actions use builtin identity
+bind it to that active call. The permission request also preserves the announced
+title and raw input. Its ACP `kind` is `other`, as in earlier versions; the
+announcement carries the call's kind. Native computer actions use builtin identity
 `computer`; their configured MCP environment does not turn them into ordinary
 MCP approvals. Their explicit approval and safety checks remain in effect.
 

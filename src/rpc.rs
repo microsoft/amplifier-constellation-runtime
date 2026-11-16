@@ -65,8 +65,12 @@ impl Peer {
         tool_call: &Value,
         cancel: &CancellationToken,
     ) -> Result<()> {
-        // Reuse the exact engine-authored announcement snapshot, including its
-        // resolved identity. Arguments and display text never supply identity.
+        // Reuse the engine-authored announcement, including its resolved identity.
+        // Arguments and display text never supply identity. The request's own
+        // kind stays "other", as in every earlier version: existing clients
+        // match on it, and it carries no authority.
+        let mut tool_call = tool_call.clone();
+        tool_call["kind"] = json!("other");
         let result=self.call("session/request_permission",json!({"sessionId":sid,"toolCall":tool_call,"options":[{"optionId":"allow_once","name":"Allow once","kind":"allow_once"},{"optionId":"reject_once","name":"Decline","kind":"reject_once"}]}),cancel).await?;
         permission_result(&result)
     }

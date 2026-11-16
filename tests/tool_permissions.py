@@ -199,7 +199,11 @@ class ToolPermissions(unittest.TestCase):
         self.assertEqual(announcements[0]["sessionId"], client.session)
         announced = dict(announcements[0]["update"])
         announced.pop("sessionUpdate")
-        self.assertEqual(call, announced, "Permission must describe the same announced call")
+        # The request's kind has always been "other"; clients match on it.
+        self.assertEqual(call["kind"], "other")
+        self.assertIn(announced["kind"], ("edit", "execute"))
+        self.assertEqual({**call, "kind": announced["kind"]}, announced,
+                         "Permission must describe the same announced call")
 
     def test_identity_capability_is_explicit(self):
         client = self.client()
