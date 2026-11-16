@@ -44,8 +44,8 @@ jobs:
       AGENT_RUNTIME_TEST_BINARY: ${{ github.workspace }}/target/${{ matrix.target }}/debug/${{ matrix.executable }}
       RUNTIME_BINARY: ${{ github.workspace }}/target/${{ matrix.target }}/debug/${{ matrix.executable }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           components: rustfmt, clippy
           targets: ${{ matrix.target }}
@@ -57,10 +57,10 @@ jobs:
         run: |
           target_env="${NATIVE_TARGET//-/_}"
           echo "CARGO_TARGET_${target_env^^}_RUSTFLAGS=-C target-feature=+crt-static" >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           cache-on-failure: true
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python }}
           architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
@@ -124,7 +124,7 @@ jobs:
           python tests/provider_identity.py
           python tests/windows_protocol.py
           python scripts/package-release.py --binary "${{ github.workspace }}/target/${{ matrix.target }}/release/${{ matrix.executable }}" --platform "${{ matrix.platform }}" --source "${{ github.sha }}" --output dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: agent-runtime-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
           path: |
@@ -134,8 +134,8 @@ jobs:
   computer-browser:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
       - run: npm ci --ignore-scripts
