@@ -117,6 +117,7 @@ jobs:
           RUNTIME_BINARY: ${{ github.workspace }}/target/${{ matrix.target }}/release/${{ matrix.executable }}
         run: |
           python tests/helper_bounds.py
+          python tests/native_context.py
           python tests/protocol.py
           python tests/tool_permissions.py
           python tests/copilot_protocol.py
