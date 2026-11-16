@@ -179,6 +179,12 @@ and off by default, and the refusal names it. With it:
   configured model option. `account_and_model_support_verified` stays `false`.
 - Every `model_options` entry follows the same rule, so a session can select an
   unlisted name only when the owner has opted in.
+- Native OpenAI opt-in still requires a numeric GPT generation of 6 or later,
+  such as `gpt-6.2-...` or `gpt-7-...`. Older GPT and `o1`/`o3`/`o4` names remain
+  refused even with the flag, as do unclassified names such as `gpt-next`.
+  This preserves the engine's retirement boundary; it does not establish a
+  model's capabilities or availability. Deployment and gateway routing rules
+  are unchanged.
 - A saved session stays bound to the exact model name. The setting itself is not
   part of that binding or of a saved model choice's route, so turning it on does
   not disturb existing sessions.

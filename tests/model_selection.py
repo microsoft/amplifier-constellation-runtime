@@ -176,7 +176,7 @@ class Tests(unittest.TestCase):
         c.close()
         self.clients.remove(c)
         config = json.loads(self.path.read_text())
-        config['model_options'].append({'model': 'gpt-unlisted-fixture', 'name': 'Unlisted'})
+        config['model_options'].append({'model': 'gpt-7-unlisted-fixture', 'name': 'Unlisted'})
         self.path.write_text(json.dumps(config))
         command = [str(protocol.BINARY), '--home', str(self.home), 'capabilities']
         refused = subprocess.run(command, capture_output=True, text=True, timeout=10)
@@ -188,15 +188,15 @@ class Tests(unittest.TestCase):
                                            check=True).stdout)
         self.assertEqual({x['model']: x['model_catalog_status'] for x in report['model_options']},
                          {'fixture': 'not_enforced', 'fixture-fast': 'not_enforced',
-                          'gpt-unlisted-fixture': 'unverified'})
+                          'gpt-7-unlisted-fixture': 'unverified'})
         c = self.client()
         loaded = c.call('session/load', {'sessionId': earlier, 'cwd': str(self.work), 'mcpServers': []})
         values = {x['id']: x['currentValue'] for x in loaded['result']['configOptions']}
         self.assertEqual(values['model'], 'fixture-fast', 'The opt-in is not a route change')
         sid = self.new(c)
-        self.assertIn('result', self.select(c, sid, 'model', 'gpt-unlisted-fixture'))
+        self.assertIn('result', self.select(c, sid, 'model', 'gpt-7-unlisted-fixture'))
         self.prompt(c, sid, 'use the selected model')
-        self.assertEqual(protocol.REQUESTS[-1]['model'], 'gpt-unlisted-fixture')
+        self.assertEqual(protocol.REQUESTS[-1]['model'], 'gpt-7-unlisted-fixture')
 
     def test_invalid_owner_options_fail_configuration_without_touching_history(self):
         original = json.loads(self.path.read_text())

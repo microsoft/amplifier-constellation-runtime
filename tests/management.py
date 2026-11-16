@@ -60,6 +60,29 @@ class Tests(unittest.TestCase):
         schema=json.loads(self.run_cli('config-schema').stdout)
         self.assertEqual(schema['$defs']['Provider']['properties']['allow_unverified_model']['type'],'boolean')
         self.assertNotIn('allow_unverified_model',schema['$defs']['Provider']['required'])
+    def test_native_openai_opt_in_preserves_generation_retirement_without_writing(self):
+        before=(self.home/'runtime.json').read_bytes()
+        for model in ('gpt-3.5-turbo','gpt-4o','gpt-5.2','o1','o3','o4-mini','gpt-next','gpt-6x'):
+            with self.subTest(model=model):
+                refused=self.run_cli('configure-provider','--provider','openai','--model',model,'--allow-unverified-model',check=False)
+                self.assertNotEqual(refused.returncode,0)
+                self.assertIn('retired or unclassified native OpenAI generations',refused.stderr)
+                self.assertEqual((self.home/'runtime.json').read_bytes(),before)
+        for model in ('gpt-6.2-unlisted-fixture','gpt-7-unlisted-fixture'):
+            self.run_cli('configure-provider','--provider','openai','--model',model,'--allow-unverified-model')
+            inspected=json.loads(self.run_cli('config-inspect').stdout)
+            self.assertEqual(inspected['config']['provider']['model'],model)
+            self.assertEqual(inspected['capabilities']['model_catalog_status'],'unverified')
+            self.assertIs(inspected['capabilities']['account_and_model_support_verified'],False)
+        # The same rule covers offered session choices, not just the default.
+        config=inspected['config'];config['model_options']=[{'model':model,'name':model,'reasoning_effort':'medium','reasoning_efforts':['medium']} for model in ('gpt-7-unlisted-fixture','gpt-5.2')]
+        candidate=Path(self.temp.name)/'retired-option.json';candidate.write_text(json.dumps(config))
+        before=(self.home/'runtime.json').read_bytes()
+        refused=self.run_cli('config-validate',candidate,check=False)
+        self.assertNotEqual(refused.returncode,0)
+        self.assertIn('retired or unclassified native OpenAI generations',refused.stderr)
+        self.assertEqual((self.home/'runtime.json').read_bytes(),before)
+
     def test_real_loopback_signin_rejects_bad_state_without_credential_write(self):
         process=subprocess.Popen([str(BINARY),'--home',str(self.home),'chatgpt-sign-in','--port','0','--no-browser'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
         try:

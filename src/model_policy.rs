@@ -8,7 +8,7 @@ pub fn catalog() -> Value {
  "openai":[{"class":"astra","model":"gpt-6-astra"},{"class":"sol","model":"gpt-6.1-sol"},{"class":"terra","model":"gpt-6.1-terra"},{"class":"luna","model":"gpt-6-luna"}],
  "anthropic":[{"class":"fable","model":"claude-fable-5-1"},{"class":"opus","model":"claude-opus-5-5"},{"class":"sonnet","model":"claude-sonnet-5-5"},{"class":"haiku","model":"claude-haiku-5-5"}],
  "gemini":[{"class":"reasoning","model":"gemini-4-argon"},{"class":"flash","model":"gemini-3.8-flash"},{"class":"flash-lite","model":"gemini-3.5-flash-lite"}],
- "unlistedModels":"An OpenAI or Claude model name outside this catalog is refused unless the owner sets provider.allow_unverified_model. It is then sent exactly as named, reported as unverified, never substituted and never added to this catalog.",
+ "unlistedModels":"An OpenAI or Claude model name outside this catalog is refused unless the owner sets provider.allow_unverified_model. Native OpenAI opt-in remains limited to numeric GPT-6-and-later names; retired or unclassified generations stay refused. An accepted name is sent unchanged, reported as unverified, never substituted and never added to this catalog.",
  "specialists":"Image, audio and decision models use independent capability configuration.",
  "otherRoutes":"Azure deployment names, local servers and gateways require route-specific capability validation; third-party ACP engines own their model policies."})
 }
@@ -60,6 +60,23 @@ pub fn validate(p: &Provider) -> Result<()> {
         p.allow_unverified_model || catalog_status(p.kind, &p.model) != CatalogStatus::Unverified,
         "This model is outside the current supported classes. Choose a current model from the runtime model catalog; saved sessions retain their original binding. For a model newer than this catalog, the owner can accept this exact name as unverified with allow_unverified_model (--allow-unverified-model)."
     );
+    if p.kind == ProviderKind::Openai
+        && p.allow_unverified_model
+        && catalog_status(p.kind, &p.model) == CatalogStatus::Unverified
+    {
+        // This is the engine's generation retirement rule, not a capability
+        // inference. An accepted, unlisted name remains explicitly unverified.
+        let generation = p
+            .model
+            .strip_prefix("gpt-")
+            .and_then(|version| version.split(['.', '-']).next())
+            .filter(|major| !major.is_empty() && major.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|major| major.parse::<u32>().ok());
+        ensure!(
+            generation.is_some_and(|major| major >= 6),
+            "allow_unverified_model does not enable retired or unclassified native OpenAI generations; choose a listed model or an explicit GPT-6-and-later model name"
+        );
+    }
     if p.kind == ProviderKind::Anthropic {
         ensure!(
             p.thinking_budget_tokens.is_none(),
@@ -127,10 +144,33 @@ mod tests {
     }
 
     #[test]
+    fn opt_in_never_restores_retired_native_openai_generations() {
+        for model in ["gpt-3.5-turbo", "gpt-4o", "gpt-5.2", "o1", "o3", "o4-mini"] {
+            assert!(
+                validate(&opted_in(ProviderKind::Openai, model)).is_err(),
+                "Retired native OpenAI model was accepted: {model}"
+            );
+        }
+        for model in [
+            "gpt-",
+            "gpt-unlisted-fixture",
+            "gpt-6x",
+            "gpt-+6",
+            "gpt-99999999999999999999",
+        ] {
+            assert!(
+                validate(&opted_in(ProviderKind::Openai, model)).is_err(),
+                "{model}"
+            );
+        }
+    }
+
+    #[test]
     fn unlisted_vendor_model_needs_the_explicit_opt_in_and_stays_unverified() {
         for (kind, model) in [
             (ProviderKind::Anthropic, "claude-unlisted-fixture"),
-            (ProviderKind::Openai, "gpt-unlisted-fixture"),
+            (ProviderKind::Openai, "gpt-6.2-unlisted-fixture"),
+            (ProviderKind::Openai, "gpt-7-unlisted-fixture"),
         ] {
             let strict = Provider::preset(kind, model.into());
             assert!(!strict.allow_unverified_model, "The default stays strict");
@@ -165,7 +205,7 @@ mod tests {
         let mut claude = opted_in(ProviderKind::Anthropic, "claude-unlisted-fixture");
         claude.thinking_budget_tokens = Some(2048);
         assert!(validate(&claude).is_err());
-        let mut gpt = opted_in(ProviderKind::Openai, "gpt-unlisted-fixture");
+        let mut gpt = opted_in(ProviderKind::Openai, "gpt-7-unlisted-fixture");
         gpt.reasoning_effort = Some("minimal".into());
         assert!(validate(&gpt).is_err());
         // Routes without a catalog rule have nothing to opt in to.
