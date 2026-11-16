@@ -12,6 +12,7 @@ python3 tests/protocol.py
 python3 tests/mcp_tls.py
 python3 tests/providers.py
 python3 tests/capabilities.py
+python3 tests/tool_permissions.py
 python3 tests/management.py
 cargo clippy --locked --all-targets -- -D warnings
 ```
