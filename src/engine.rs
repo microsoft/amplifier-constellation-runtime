@@ -558,7 +558,17 @@ impl Turn<'_> {
                         .context("Computer environment is unavailable")?;
                     let args = computer.arguments(&call)?;
                     let input = json!({"environment":computer.mcp_server,"tool":computer.mcp_tool,"actions":args["actions"],"pending_safety_checks":call["pending_safety_checks"]});
-                    self.peer.update(&self.session.id,json!({"sessionUpdate":"tool_call","toolCallId":call_id,"title":"Control the configured computer environment","kind":"execute","status":"pending","rawInput":input})).await?;
+                    // The native computer operation has additional safety
+                    // semantics; it is not an ordinary MCP tool approval.
+                    let tool_call = crate::tool_identity::Identity::Builtin("computer").call(
+                        call_id,
+                        "Control the configured computer environment",
+                        "execute",
+                        &input,
+                    );
+                    self.peer
+                        .announce_tool(&self.session.id, &tool_call)
+                        .await?;
                     self.store.event(
                         &self.session.id,
                         Some(turn),
@@ -571,13 +581,7 @@ impl Turn<'_> {
                         ))
                     } else {
                         self.peer
-                            .permission(
-                                &self.session.id,
-                                call_id,
-                                "Control the configured computer environment",
-                                &input,
-                                &self.cancel,
-                            )
+                            .permission(&self.session.id, &tool_call, &self.cancel)
                             .await
                     };
                     let allowed = authorization.is_ok();
@@ -640,11 +644,19 @@ impl Turn<'_> {
                 ensure!(arguments.len() <= 1024 * 1024, "Tool input exceeds limit");
                 let args: Value =
                     serde_json::from_str(arguments).context("Invalid tool arguments")?;
-                ensure!(
-                    definitions.iter().any(|d| d["name"] == name),
-                    "Provider requested a tool that was not offered"
-                );
+                let definition = definitions
+                    .iter()
+                    .find(|d| d["name"] == name)
+                    .context("Provider requested a tool that was not offered")?;
                 let is_mcp = self.mcp.tools.get(name);
+                // Enforce the offered model-facing builtin schema before
+                // permission or effects. MCP arguments remain the server's
+                // domain; internal artifact transformations happen afterwards.
+                let input_validation = if is_mcp.is_some() {
+                    Ok(())
+                } else {
+                    crate::tool_schema::validate_builtin(definition, &args)
+                };
                 let mutating = is_mcp
                     .map(|t| {
                         !(t.readonly
@@ -670,7 +682,18 @@ impl Turn<'_> {
                 } else {
                     args.clone()
                 };
-                self.peer.update(&self.session.id,json!({"sessionUpdate":"tool_call","toolCallId":call_id,"title":title,"kind":kind,"status":"pending","rawInput":permission_input})).await?;
+                let identity = if let Some(tool) = is_mcp {
+                    crate::tool_identity::Identity::Mcp {
+                        server: &tool.server,
+                        name: &tool.name,
+                    }
+                } else {
+                    crate::tool_identity::Identity::Builtin(name)
+                };
+                let tool_call = identity.call(call_id, &title, kind, &permission_input);
+                self.peer
+                    .announce_tool(&self.session.id, &tool_call)
+                    .await?;
                 // Intent is durable before effects. A restart adds an explicit
                 // unknown-outcome result instead of running the call again.
                 self.store.event(
@@ -679,7 +702,11 @@ impl Turn<'_> {
                     "tool.intent",
                     json!({"call_id":call_id,"name":name,"mutating":mutating}),
                 )?;
-                let authorization = if !mutating {
+                let authorization = if let Err(error) = input_validation {
+                    // A normal failed tool result lets the model correct its
+                    // arguments within the existing turn and call budgets.
+                    Err(error)
+                } else if !mutating {
                     Ok(())
                 } else if self.session.mode == Mode::ReadOnly {
                     Err(anyhow::anyhow!(
@@ -694,26 +721,14 @@ impl Turn<'_> {
                         Ok(())
                     } else {
                         self.peer
-                            .permission(
-                                &self.session.id,
-                                call_id,
-                                &title,
-                                &permission_input,
-                                &self.cancel,
-                            )
+                            .permission(&self.session.id, &tool_call, &self.cancel)
                             .await
                     }
                 } else if self.session.mode == Mode::Workspace {
                     Ok(())
                 } else {
                     self.peer
-                        .permission(
-                            &self.session.id,
-                            call_id,
-                            &title,
-                            &permission_input,
-                            &self.cancel,
-                        )
+                        .permission(&self.session.id, &tool_call, &self.cancel)
                         .await
                 };
                 let result = if let Err(error) = authorization {

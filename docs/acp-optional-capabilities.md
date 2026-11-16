@@ -8,6 +8,41 @@ resources are retained without claiming that a text model decoded them. The
 runtime does not expose client filesystem or terminal callbacks; its file tools
 operate inside the agent's granted workspace.
 
+## Tool identity for permission decisions
+
+Initialization advertises
+`agentCapabilities._meta["com.microsoft.amplifier.tool"] = {"version":1}`.
+For each live execution permission request, the engine supplies the same identity
+on the preceding `session/update` tool-call announcement and on
+`session/request_permission.params.toolCall`, under
+`_meta["com.microsoft.amplifier.tool"]`:
+
+```json
+{"version":1,"kind":"builtin","name":"workspace_write"}
+{"version":1,"kind":"mcp","name":"observe","server":"minecraft"}
+```
+
+`server` is present only for MCP. Identity comes from the resolved engine tool
+registry, never from model arguments. The enclosing `sessionId` and `toolCallId`
+bind it to that active call. The permission snapshot also preserves the announced
+title, ACP kind and raw input. Native computer actions use builtin identity
+`computer`; their configured MCP environment does not turn them into ordinary
+MCP approvals. Their explicit approval and safety checks remain in effect.
+
+A client using this capability validates its selected ACP peer, session and
+active announcement. Missing, unsupported or conflicting identity is not a reason
+to fall back to argument-based approval. Advertising metadata is not independent
+proof of trust in an arbitrary peer. Replay and observational status cards do not
+grant permission and need not carry this live-request identity.
+
+The existing MCP `rawInput` envelope remains `{server,tool,arguments}`. Builtin
+`rawInput` remains the supplied arguments; the engine validates them against the
+offered builtin schema before requesting approval or performing effects. Invalid
+arguments produce a failed tool result so the model can correct them within its
+existing budgets. Free-form data remains free where the schema allows it; this
+does not impose Runtime's builtin schema restrictions on MCP tools. Session modes,
+workspace boundaries and endpoint-specific MCP authorization are unchanged.
+
 ## Session model and reasoning choices
 
 The standard `session/set_config_option` method accepts `model` (category
