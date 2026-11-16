@@ -14,6 +14,8 @@ agent-runtime --home /absolute/engine configure /absolute/candidate.json \
 
 `config-schema` returns JSON Schema plus `x-agent-runtime`: contract version, engine version, human-readable sections, provider presets, decision presets, credential policy, and application semantics. `config-inspect` returns the complete configuration, its revision, and capability report. It never reads secret values. `config-validate` checks a complete proposed configuration against the running version without saving it. Unknown fields and unsupported capability/provider combinations are errors.
 
+Model names are checked by the engine's own [model policy](providers.md#current-model-selection); a configuration client does not keep a second catalog. `provider.allow_unverified_model` (default `false`, omitted from saved configuration when off) is the owner's explicit acceptance of an OpenAI or Claude model name the catalog does not list. `config-validate`, `check` and the capability report in `config-inspect` return `model_catalog_status`: `listed`, `unverified` or `not_enforced`. Show an `unverified` model as such; it is never a verified choice.
+
 `configure` requires the revision from inspection. A concurrent edit is rejected without overwriting it. The previous file is preserved under `configuration-backups/`; the response includes its path. Updates are private atomic replacements under a process lock. `configure-provider`, `configure-capabilities`, and `configure-decision` use the same mechanism.
 
 Installation configuration changes apply to **new ACP processes**, not already

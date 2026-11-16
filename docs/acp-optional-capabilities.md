@@ -46,6 +46,8 @@ client can provide a new endpoint or credential. Include `default` in a model's
 `reasoning_efforts` only to allow omitting the provider reasoning parameter; this
 differs from the explicit effort `none`. An empty list exposes no reasoning
 control. Invalid, duplicate or unsupported configuration is rejected at startup.
+Each choice passes the same [model policy](providers.md#a-model-the-catalog-does-not-list-yet)
+as the default model, including the owner's `allow_unverified_model` opt-in.
 
 An explicit choice is saved per session and survives close, process restart and
 load/resume. A new session still uses installation defaults. Other connections

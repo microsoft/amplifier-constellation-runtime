@@ -161,6 +161,10 @@ struct ProviderOptions {
     tls_ca_file: Option<PathBuf>,
     #[arg(long)]
     allow_insecure_http: bool,
+    /// Accept an OpenAI or Claude model name the runtime catalog does not list.
+    /// The exact name is used and reported as unverified; nothing is substituted.
+    #[arg(long)]
+    allow_unverified_model: bool,
     /// Field carrying the output-token limit to a compatible chat server.
     #[arg(long, value_enum, default_value = "max_tokens")]
     token_limit_parameter: TokenLimitParameter,
@@ -200,6 +204,7 @@ impl ProviderOptions {
         p.api_version = self.api_version;
         p.tls_ca_file = self.tls_ca_file;
         p.allow_insecure_http = self.allow_insecure_http;
+        p.allow_unverified_model = self.allow_unverified_model;
         p.token_limit_parameter = self.token_limit_parameter;
         Ok(p)
     }
@@ -323,10 +328,10 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         Command::ConfigValidate { file } => {
-            agent_runtime::management::load_candidate(&home, file)?;
+            let candidate = agent_runtime::management::load_candidate(&home, file)?;
             println!(
                 "{}",
-                serde_json::json!({"valid":true,"authentication_verified":false})
+                serde_json::json!({"valid":true,"authentication_verified":false,"model_catalog_status":agent_runtime::model_policy::catalog_status(candidate.provider.kind,&candidate.provider.model)})
             );
             return Ok(());
         }
@@ -451,7 +456,7 @@ async fn main() -> Result<()> {
         }
         Command::Check => println!(
             "{}",
-            serde_json::json!({"valid":true,"engine":"native-rust","provider":config.provider.kind,"model":config.provider.model,"authentication_method":config.provider.auth,"api_key_present":config.provider.auth!=ProviderAuth::Chatgpt && std::env::var(&config.provider.api_key_env).is_ok_and(|v|!v.trim().is_empty()),"chatgpt_account_configured":config.provider.chatgpt_credentials_file.as_ref().is_some_and(|p|p.is_file()),"authentication_verified":false,"local_commands_available":agent_runtime::tools::command_isolation_for(&config).is_some(),"local_command_isolation":agent_runtime::tools::command_isolation_for(&config),"local_command_network":config.command_network,"mode":config.mode,"version":env!("CARGO_PKG_VERSION")})
+            serde_json::json!({"valid":true,"engine":"native-rust","provider":config.provider.kind,"model":config.provider.model,"model_catalog_status":agent_runtime::model_policy::catalog_status(config.provider.kind,&config.provider.model),"authentication_method":config.provider.auth,"api_key_present":config.provider.auth!=ProviderAuth::Chatgpt && std::env::var(&config.provider.api_key_env).is_ok_and(|v|!v.trim().is_empty()),"chatgpt_account_configured":config.provider.chatgpt_credentials_file.as_ref().is_some_and(|p|p.is_file()),"authentication_verified":false,"local_commands_available":agent_runtime::tools::command_isolation_for(&config).is_some(),"local_command_isolation":agent_runtime::tools::command_isolation_for(&config),"local_command_network":config.command_network,"mode":config.mode,"version":env!("CARGO_PKG_VERSION")})
         ),
         Command::Diagnostics => println!("{}", agent_runtime::observability::inspect(&store)?),
         Command::Sessions => println!("{}", store.list(None, None)?),

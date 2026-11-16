@@ -39,9 +39,10 @@ Choose a model that your account or server actually provides, with tool support 
 --token-limit-parameter max_tokens|max_completion_tokens   (chat-completions, litellm)
 --tls-ca-file /absolute/path/to/ca.pem
 --allow-insecure-http                  (explicit private LAN opt-in)
+--allow-unverified-model               (explicit opt-in to an unlisted OpenAI/Claude model)
 ```
 
-The JSON configuration uses `provider.kind`, `api_key_env`, `reasoning_effort`, `thinking_budget_tokens`, `api_version`, `tls_ca_file`, `allow_insecure_http`, `token_limit_parameter`, and `auth` (`api_key` in JSON). The environment variable's name is saved; its value is not. `check` validates local configuration, not account access or model availability.
+The JSON configuration uses `provider.kind`, `api_key_env`, `reasoning_effort`, `thinking_budget_tokens`, `api_version`, `tls_ca_file`, `allow_insecure_http`, `allow_unverified_model`, `token_limit_parameter`, and `auth` (`api_key` in JSON). The environment variable's name is saved; its value is not. `check` validates local configuration, not account access or model availability.
 
 ## Examples
 
@@ -150,6 +151,51 @@ also lists Gemini 4 Argon, 3.8 Flash, and 3.5 Flash-Lite. Those Gemini entries a
 documentation-verified choices, not claims of live account access. Specialist
 image, audio, and decision configurations remain independent. Azure deployment
 names, local servers, and gateways retain their own routing/capability checks.
+
+### A model the catalog does not list yet
+
+For the `openai` and `anthropic` providers, a `gpt-*`, `o1*`, `o3*`, `o4*` or
+`claude-*` model name outside the catalog is refused by default. That catches
+typing mistakes and retired names. It also means that a model released after
+this runtime version cannot be chosen by name alone. The owner can accept one
+such name explicitly:
+
+```sh
+agent-runtime --home /absolute/path/to/agent configure-provider \
+  --provider anthropic --model claude-NEWER-MODEL --allow-unverified-model
+```
+
+This saves `"allow_unverified_model": true` in `provider`. The setting is absent
+and off by default, and the refusal names it. With it:
+
+- The runtime sends exactly the configured name. It does not substitute a listed
+  model, add a fallback, change the transport or relax any other rule. If the
+  provider or account rejects the name or a request setting, that call fails.
+- The catalog is unchanged. `capabilities`, `config-inspect`, `config-validate`,
+  `check` and the agent's `runtime_capabilities` tool report
+  `model_catalog_status` as `unverified` for that name, instead of `listed`
+  (`not_enforced` describes routes with no catalog rule, such as deployment
+  names and gateways). The capability report gives the status of every
+  configured model option. `account_and_model_support_verified` stays `false`.
+- Every `model_options` entry follows the same rule, so a session can select an
+  unlisted name only when the owner has opted in.
+- Native OpenAI opt-in still requires a numeric GPT generation of 6 or later,
+  such as `gpt-6.2-...` or `gpt-7-...`. Older GPT and `o1`/`o3`/`o4` names remain
+  refused even with the flag, as do unclassified names such as `gpt-next`.
+  This preserves the engine's retirement boundary; it does not establish a
+  model's capabilities or availability. Deployment and gateway routing rules
+  are unchanged.
+- A saved session stays bound to the exact model name. The setting itself is not
+  part of that binding or of a saved model choice's route, so turning it on does
+  not disturb existing sessions.
+
+No live check in this document covers an unlisted model. The opt-in exists for a
+name newer than the catalog. It does not restore retired generations: native
+OpenAI generation still uses only the current Responses WebSocket requests. Use a
+listed model again, without the setting, once a runtime release lists it. The
+setting is refused on other providers, where no catalog rule applies. The
+installer script does not pass it; opt in on an installed agent with
+`configure-provider`, keeping its existing `--key-env`.
 
 Changing a catalog does not change a saved conversation's model binding. Select
 a supported model explicitly when migrating an installation; provider changes

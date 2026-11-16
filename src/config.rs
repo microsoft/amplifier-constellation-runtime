@@ -102,6 +102,12 @@ pub struct Provider {
     pub allow_insecure_http: bool,
     #[serde(default)]
     pub mock_response: Option<String>,
+    /// Explicit owner acceptance of an OpenAI or Claude model name that this
+    /// version's dated catalog does not list. The exact name is used unchanged
+    /// and is reported as unverified; nothing is substituted. Absent when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[schemars(extend("default" = false))]
+    pub allow_unverified_model: bool,
     /// Field that carries `limits.max_output_tokens` to a compatible chat
     /// server. An explicit owner choice: the runtime neither probes for the
     /// name nor resends a rejected request. Absent at its default.
@@ -248,6 +254,7 @@ impl Provider {
             tls_ca_file: None,
             allow_insecure_http: false,
             mock_response: None,
+            allow_unverified_model: false,
             token_limit_parameter: TokenLimitParameter::default(),
             native: Default::default(),
         }
