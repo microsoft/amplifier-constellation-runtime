@@ -108,8 +108,53 @@ pub struct Provider {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     #[schemars(extend("default" = false))]
     pub allow_unverified_model: bool,
+    /// Field that carries `limits.max_output_tokens` to a compatible chat
+    /// server. An explicit owner choice: the runtime neither probes for the
+    /// name nor resends a rejected request. Absent at its default.
+    #[serde(default, skip_serializing_if = "TokenLimitParameter::is_default")]
+    #[schemars(extend("default" = "max_tokens"))]
+    pub token_limit_parameter: TokenLimitParameter,
     #[serde(default, skip_serializing_if = "crate::capabilities::Native::is_empty")]
     pub native: crate::capabilities::Native,
+}
+/// Compatible chat servers disagree on the output-token limit's field name.
+#[derive(
+    Clone,
+    Copy,
+    Default,
+    Debug,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    clap::ValueEnum,
+    schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenLimitParameter {
+    #[default]
+    #[value(name = "max_tokens")]
+    MaxTokens,
+    /// OpenAI's Chat Completions endpoint refuses `max_tokens` for its current models.
+    #[value(name = "max_completion_tokens")]
+    MaxCompletionTokens,
+}
+impl TokenLimitParameter {
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::MaxTokens => "max_tokens",
+            Self::MaxCompletionTokens => "max_completion_tokens",
+        }
+    }
+    pub fn other(self) -> Self {
+        match self {
+            Self::MaxTokens => Self::MaxCompletionTokens,
+            Self::MaxCompletionTokens => Self::MaxTokens,
+        }
+    }
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 #[derive(
     Clone,
@@ -210,6 +255,7 @@ impl Provider {
             allow_insecure_http: false,
             mock_response: None,
             allow_unverified_model: false,
+            token_limit_parameter: TokenLimitParameter::default(),
             native: Default::default(),
         }
     }
@@ -553,6 +599,14 @@ impl Config {
             "mock_response applies only to the mock provider"
         );
         ensure!(
+            self.provider.token_limit_parameter == TokenLimitParameter::default()
+                || matches!(
+                    self.provider.kind,
+                    ProviderKind::ChatCompletions | ProviderKind::Litellm
+                ),
+            "token_limit_parameter applies only to the chat-completions and litellm providers"
+        );
+        ensure!(
             (1..=100).contains(&self.limits.max_model_calls)
                 && (1..=300).contains(&self.limits.max_tool_calls),
             "Invalid turn budget"
@@ -658,4 +712,57 @@ pub fn private_write(path: &Path, bytes: &[u8]) -> Result<()> {
     file.write_all(bytes)?;
     file.sync_all()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_limit_parameter_is_absent_by_default_and_only_for_compatible_chat() {
+        let temp = tempfile::tempdir().unwrap();
+        let (home, work) = (temp.path().join("state"), temp.path().join("work"));
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir(&work).unwrap();
+        let mut config = Config::initial(work, "Fixture".into(), "fixture".into());
+        for kind in [ProviderKind::ChatCompletions, ProviderKind::Litellm] {
+            config.provider = Provider::preset(kind, "fixture".into());
+            config.provider.endpoint = "http://127.0.0.1:9/v1/chat/completions".into();
+            config.validate(&home).unwrap();
+            // Existing files, their revisions, session bindings and saved model
+            // choices stay byte-for-byte the same while the setting is unused.
+            let saved = serde_json::to_string(&config.provider).unwrap();
+            assert!(!saved.contains("token_limit_parameter"));
+            let restored: Provider = serde_json::from_str(&saved).unwrap();
+            assert_eq!(
+                restored.token_limit_parameter,
+                TokenLimitParameter::MaxTokens
+            );
+            let binding = config.provider.fingerprint();
+            let route = crate::model_selection::route(&config);
+            config.provider.token_limit_parameter = TokenLimitParameter::MaxCompletionTokens;
+            config.validate(&home).unwrap();
+            assert_eq!(
+                serde_json::to_value(&config.provider).unwrap()["token_limit_parameter"],
+                "max_completion_tokens"
+            );
+            // Correcting the field name keeps existing sessions usable.
+            assert_eq!(config.provider.fingerprint(), binding);
+            assert_eq!(crate::model_selection::route(&config), route);
+        }
+        // Ollama, Responses and the vendor protocols each have one fixed field.
+        for kind in [
+            ProviderKind::Ollama,
+            ProviderKind::Vllm,
+            ProviderKind::Anthropic,
+        ] {
+            config.provider = Provider::preset(kind, "claude-sonnet-5-5".into());
+            config.provider.token_limit_parameter = TokenLimitParameter::MaxCompletionTokens;
+            let error = config.validate(&home).unwrap_err().to_string();
+            assert!(
+                error.contains("token_limit_parameter applies only"),
+                "{error}"
+            );
+        }
+    }
 }

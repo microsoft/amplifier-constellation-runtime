@@ -1,6 +1,6 @@
 //! Provider-owned model windows over an unchanged durable transcript.
 //! A checkpoint is usable only for the exact original prefix and settings.
-use super::{Provider, history};
+use super::{Provider, history, rejection};
 use crate::{
     config::{ProviderAuth, ProviderKind},
     context::View,
@@ -28,20 +28,6 @@ impl std::fmt::Display for ContextRejection {
     }
 }
 impl std::error::Error for ContextRejection {}
-
-fn rejection_reason(body: &Value) -> &'static str {
-    // Never copy arbitrary provider messages, parameters or codes into logs.
-    match body["error"]["code"]
-        .as_str()
-        .or(body["error"]["type"].as_str())
-    {
-        Some("context_length_exceeded") => "context_length_exceeded",
-        Some("rate_limit_exceeded" | "rate_limit_error") => "rate_limited",
-        Some("invalid_api_key" | "authentication_error") => "authentication_failed",
-        Some("invalid_request_error") => "invalid_request",
-        _ => "provider_rejected",
-    }
-}
 
 fn digest(value: &(impl serde::Serialize + ?Sized)) -> Result<String> {
     Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(value)?)))
@@ -244,18 +230,10 @@ impl Provider {
                 .context("Context service unavailable")?;
             if !response.status().is_success() {
                 let status = response.status().as_u16();
-                let mut stream = response.bytes_stream();
-                let mut bytes = Vec::new();
-                while let Some(Ok(part)) = stream.next().await {
-                    if bytes.len() + part.len() > 8192 {
-                        break;
-                    }
-                    bytes.extend_from_slice(&part);
-                }
-                let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+                let refusal = rejection::Refusal::read(response).await;
                 return Err(ContextRejection {
                     status,
-                    reason: rejection_reason(&body),
+                    reason: refusal.reason().unwrap_or("provider_rejected"),
                 }
                 .into());
             }

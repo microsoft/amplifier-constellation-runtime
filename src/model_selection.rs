@@ -100,8 +100,8 @@ pub fn validate_options(config: &Config, home: &Path) -> Result<()> {
 }
 
 /// Includes account selector, permissions on the route and native configuration,
-/// but not secrets, the selected model, its reasoning control or the owner's
-/// acceptance of an uncataloged model name.
+/// but not secrets, the selected model, its reasoning control, model-name
+/// opt-in or the name of the output-token field.
 pub fn route(config: &Config) -> String {
     fn sorted(value: Value) -> Value {
         match value {
@@ -122,6 +122,11 @@ pub fn route(config: &Config) -> String {
         .as_object_mut()
         .unwrap()
         .remove("allow_unverified_model");
+    // Wire spelling, not a route: correcting it must not orphan saved choices.
+    value
+        .as_object_mut()
+        .unwrap()
+        .remove("token_limit_parameter");
     format!(
         "{:x}",
         Sha256::digest(serde_json::to_vec(&sorted(value)).unwrap())
