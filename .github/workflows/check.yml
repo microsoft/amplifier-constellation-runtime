@@ -112,6 +112,7 @@ jobs:
         if: runner.os == 'Linux'
       - run: cargo build --release --locked
       - name: Verify and package the actual native release
+        shell: bash
         env:
           AGENT_RUNTIME_TEST_BINARY: ${{ github.workspace }}/target/${{ matrix.target }}/release/${{ matrix.executable }}
           RUNTIME_BINARY: ${{ github.workspace }}/target/${{ matrix.target }}/release/${{ matrix.executable }}
