@@ -4,6 +4,14 @@ Version 0.5 uses the official `github-copilot-sdk==1.0.15` for model inference o
 
 The bridge starts a private, temporary SDK session for each model step. It supplies the saved normalized conversation and advertises only the Rust runtime's offered tools. SDK permissions and all SDK tool execution are denied. The first complete requested tool batch is captured, the SDK session is stopped, and Rust applies its normal mode and approval checks before executing anything. SDK-owned plugins, MCP servers, skills, config discovery, memory, and persistent session storage are disabled.
 
+A well-formed call to an unlisted tool name receives a failed result from Rust,
+so the model can request an offered name on its next step. The runtime does not
+execute, approve, or automatically alias the unlisted call. It consumes the
+existing tool and model budgets, and any corrected call still needs the normal
+schema, session-mode and permission checks. Malformed calls still fail the step.
+Existing Copilot installations need both the updated runtime and its matching
+`bridges/copilot/provider.py`; an older bridge still rejects unlisted names.
+
 ## Set up an installation
 
 Keep the Python environment and bridge with this agent's own deployment files, outside its workspace. Python 3.11 or newer is required by the SDK. For example, from this repository:

@@ -29,8 +29,7 @@ def public_dict(obj):
 
 
 class Capture:
-    def __init__(self, allowed):
-        self.allowed = set(allowed)
+    def __init__(self):
         self.done = asyncio.Event()
         self.output = []
         self.usage = {}
@@ -60,9 +59,16 @@ class Capture:
             for call in calls:
                 name = value(call, "name", "")
                 call_id = value(call, "tool_call_id", value(call, "toolCallId", ""))
-                args = value(call, "arguments", {}) or {}
-                if not call_id or name not in self.allowed or not isinstance(args, dict):
-                    self.error = "Copilot returned an invalid or unadvertised tool request"
+                args = value(call, "arguments", {})
+                if args is None:
+                    args = {}
+                # Capture structure, not authority. Rust resolves the name
+                # against its offered registry, returning an ordinary failed
+                # result for unlisted names within the existing turn budgets.
+                if (not isinstance(call_id, str) or not call_id
+                        or not isinstance(name, str) or not name
+                        or not isinstance(args, dict)):
+                    self.error = "Copilot returned an invalid tool request"
                     self.done.set()
                     return
                 if call_id in seen:
@@ -112,7 +118,7 @@ async def complete(request, client_factory=None):
             models = await client.list_models()
             return {"protocol_version": 1, "models": [{"id": public_dict(m).get("id"), "name": public_dict(m).get("name")} for m in models]}
         tools = request.get("tools", [])
-        capture = Capture(t["name"] for t in tools)
+        capture = Capture()
         config = dict(
             model=request["model"],
             system_message={"mode": "replace", "content": request["instructions"]},
