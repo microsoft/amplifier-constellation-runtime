@@ -55,6 +55,10 @@ This prevents a switch to native compaction from submitting an oversized full
 transcript: the compact endpoint itself still has an input context limit. The
 archive note identifies omitted history and `session_history` retrieves it.
 Once a native checkpoint exists, its canonical window is retained intact.
+Items saved after it still have producer-declared snapshots refreshed, so a
+client that sends its context again with every prompt adds the retained text of
+the previous prompt to the window, not another whole copy. Input waiting at a
+request boundary counts as the newest version from the request that carries it.
 Compaction rejection events include the HTTP status and an allowlisted reason
 (for example `context_length_exceeded`), never the provider's raw error text.
 OpenAI Responses uses the standalone compact endpoint at a settled boundary,
@@ -117,7 +121,12 @@ boundary. Ambiguous calls are never retried automatically.
 
 Stable instructions and deterministically ordered tools preserve cache prefixes.
 Anthropic marks the stable system prefix and requests automatic caching; OpenAI
-uses its automatic prefix cache. Credential values are never part of diagnostics.
+uses its automatic prefix cache. A refreshed snapshot replaces the text of the
+prompt before it, which is where the automatic breakpoint of the last turn
+ended. Anthropic requests therefore also mark the last block before each of the
+two newest snapshot prompts: the next turn reads up to the replaced prompt and
+writes that prompt's retained text, the turn that followed it and the new
+prompt. Credential values are never part of diagnostics.
 
 ## Execution measurements
 
@@ -149,4 +158,5 @@ Implementation guidance: [OpenAI compaction](https://developers.openai.com/api/d
 [Responses WebSockets](https://developers.openai.com/api/docs/guides/websocket-mode),
 [steering](https://developers.openai.com/api/docs/guides/steering),
 [Anthropic on-demand compaction](https://platform.claude.com/docs/en/build-with-claude/compaction-on-demand),
-and [prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching).
+[prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching),
+and [preserved thinking](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking).

@@ -45,11 +45,44 @@ pub(super) fn context_tokens(usage: &Value) -> u64 {
             .unwrap_or(0)
 }
 
-fn restored(
-    original: &[Value],
-    checkpoints: Vec<Value>,
-    settings: &str,
-) -> Result<(Vec<Value>, Option<usize>, bool)> {
+/// What the saved checkpoints leave for one request. `window` is a provider's
+/// canonical output and is sent as it was returned. `tail` is the saved items
+/// after it, which this runtime still owns.
+struct Restored {
+    window: Vec<Value>,
+    tail: Vec<Value>,
+    compacted_bytes: Option<usize>,
+    native: bool,
+}
+impl Restored {
+    /// The window, then the tail with producer-declared snapshots refreshed.
+    /// A canonical window is never reinterpreted; without this projection every
+    /// prompt saved after it would stay whole until the next compaction.
+    /// `pending` is input sent with this request and saved after it. Projecting
+    /// it here gives the next request the same prefix this one sends.
+    fn view(&self, pending: &[Value]) -> Vec<Value> {
+        let mut tail = self.tail.clone();
+        tail.extend_from_slice(pending);
+        crate::context::project_snapshots(&mut tail);
+        let mut view = self.window.clone();
+        view.extend(tail);
+        view
+    }
+}
+
+fn restored(original: &[Value], checkpoints: Vec<Value>, settings: &str) -> Result<Restored> {
+    // Only server compaction items in the durable transcript can prune a
+    // prefix. Standalone compact output is a canonical window, kept intact in
+    // a checkpoint.
+    let server_window = |items: &[Value]| {
+        let index = items.iter().rposition(|v| v["type"] == "compaction")?;
+        Some(Restored {
+            window: vec![],
+            tail: items[index..].to_vec(),
+            compacted_bytes: None,
+            native: true,
+        })
+    };
     for c in checkpoints {
         if c["kind"] != "provider_native" || c["settings_sha256"] != settings {
             continue;
@@ -59,31 +92,23 @@ fn restored(
             continue;
         }
         if let Some(base) = c["model_items"].as_array() {
-            let mut result = base.clone();
-            result.extend_from_slice(&original[n..]);
-            let baseline = crate::media::context_bytes(&crate::mcp::model_view(base))?;
-            let newer_server_window = original[n..].iter().any(|v| v["type"] == "compaction");
-            return Ok((
-                server_window(&original[n..], result),
-                (!newer_server_window).then_some(baseline),
-                true,
-            ));
+            if let Some(newer) = server_window(&original[n..]) {
+                return Ok(newer);
+            }
+            return Ok(Restored {
+                window: base.clone(),
+                tail: original[n..].to_vec(),
+                compacted_bytes: Some(crate::media::context_bytes(&crate::mcp::model_view(base))?),
+                native: true,
+            });
         }
     }
-    Ok((
-        server_window(original, original.to_vec()),
-        None,
-        original.iter().any(|v| v["type"] == "compaction"),
-    ))
-}
-
-/// Only server compaction items in the durable transcript can prune a prefix.
-/// Standalone compact output is a canonical window, kept intact in a checkpoint.
-fn server_window(original: &[Value], base: Vec<Value>) -> Vec<Value> {
-    if let Some(index) = original.iter().rposition(|v| v["type"] == "compaction") {
-        return original[index..].to_vec();
-    }
-    base
+    Ok(server_window(original).unwrap_or(Restored {
+        window: vec![],
+        tail: original.to_vec(),
+        compacted_bytes: None,
+        native: false,
+    }))
 }
 
 /// The provider refuses a request whose final assistant message ends on a
@@ -147,33 +172,41 @@ impl Provider {
             .max_context_bytes
             .checked_sub(fixed)
             .context("Instructions and tools exceed context budget")?;
+        // Input waiting at this boundary is sent with the request and saved
+        // only once the provider completes it. It is never summary source.
+        let pending: Vec<Value> = self
+            .boundary_inputs
+            .iter()
+            .map(|input| input.item.clone())
+            .collect();
         if !self.native_context() {
-            return crate::context::prepare(
-                original,
-                &self.config.context,
-                budget,
-                active_turn_start,
-            );
+            let mut view =
+                crate::context::prepare(original, &self.config.context, budget, active_turn_start)?;
+            view.items.extend(pending);
+            return Ok(view);
         }
         let settings = digest(&json!({"instructions":instructions,"tools":tools}))?;
         let provider = self.config.provider.fingerprint();
-        let (mut items, compacted_bytes, native_window) = restored(
+        let mut source = restored(
             original,
             store.provider_checkpoints(sid, &provider)?,
             &settings,
         )?;
+        let compacted_bytes = source.compacted_bytes;
         // An existing transcript may be much larger than a provider's input
         // window. Native compaction cannot ingest an unlimited archive. Keep
         // the established bounded projection until a native checkpoint exists,
         // including producer-declared refreshed snapshots. Never reinterpret
         // or prune a canonical native window through the extractive fallback.
         let mut checkpoint = None;
-        if !native_window {
+        let mut items = if source.native {
+            source.view(&[])
+        } else {
             let view =
                 crate::context::prepare(original, &self.config.context, budget, active_turn_start)?;
-            items = view.items;
             checkpoint = view.checkpoint;
-        }
+            view.items
+        };
         // Count the same lossless client-tool view that provider serialization
         // uses. The stored native checkpoint and opaque provider records remain
         // unchanged; only correlated redundant MCP fallbacks can be omitted.
@@ -231,6 +264,12 @@ impl Provider {
             store.checkpoint(sid, &provider, &native_checkpoint)?;
             checkpoint = None;
             items = crate::mcp::model_view(&window);
+            source = Restored {
+                window,
+                tail: vec![],
+                compacted_bytes: None,
+                native: true,
+            };
             self.context_tokens = 0;
             store.event(sid,Some(turn),"context.compacted",json!({"kind":"provider_native","input_bytes":bytes,"model_context_bytes":serde_json::to_vec(&items)?.len(),"elapsed_ms":started.elapsed().as_millis(),"usage":usage,"full_history_preserved":true}))?;
         }
@@ -238,6 +277,13 @@ impl Provider {
             crate::media::context_bytes(&items)? <= budget && crate::media::request_fits(&items)?,
             "Provider model window exceeds byte limit; full history retained"
         );
+        if !pending.is_empty() {
+            if source.native {
+                items = crate::mcp::model_view(&source.view(&pending));
+            } else {
+                items.extend(pending);
+            }
+        }
         Ok(View { items, checkpoint })
     }
 
@@ -426,22 +472,83 @@ mod tests {
         ];
         let cp = json!({"kind":"provider_native","prefix_items":1,"prefix_sha256":digest(&original[..1]).unwrap(),"settings_sha256":"settings","model_items":canonical});
         let view = restored(&original, vec![cp.clone()], "settings").unwrap();
+        assert!(view.native);
         assert_eq!(
-            view.0,
+            view.view(&[]),
             vec![
                 canonical[0].clone(),
                 canonical[1].clone(),
                 original[1].clone()
             ]
         );
-        assert_eq!(
-            restored(&original, vec![cp.clone()], "changed-tools")
-                .unwrap()
-                .0,
-            original
-        );
+        let unbound = restored(&original, vec![cp.clone()], "changed-tools").unwrap();
+        assert!(!unbound.native);
+        assert_eq!(unbound.view(&[]), original);
         let changed = vec![json!({"role":"user","content":"different"})];
-        assert_eq!(restored(&changed, vec![cp], "settings").unwrap().0, changed);
+        let unbound = restored(&changed, vec![cp], "settings").unwrap();
+        assert!(!unbound.native);
+        assert_eq!(unbound.view(&[]), changed);
+    }
+    #[test]
+    fn saved_items_after_a_window_refresh_snapshots_and_the_window_does_not() {
+        use crate::context::SNAPSHOT_META;
+        let prompt = |text: &str, retained: &str| json!({"role":"user","content":text,"_acp_prompt":[{"type":"text","text":text,"_meta":{SNAPSHOT_META:{"version":1,"key":"room","retainedText":retained}}}]});
+        let replaced = |retained: &str| {
+            format!(
+                "Historical request/context (the refreshed projection is supplied later; original text remains in session_history):\n{retained}"
+            )
+        };
+        let reply = json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"Finished"}]});
+        let original = vec![
+            prompt("SUMMARIZED ROOM", "summarized request"),
+            reply.clone(),
+            prompt("SECOND ROOM", "second request"),
+            reply.clone(),
+            prompt("THIRD ROOM", "third request"),
+        ];
+        // A window is the provider's own output. Even an item in it that looks
+        // like a declared snapshot is sent exactly as it was returned.
+        let canonical = vec![
+            prompt("RETAINED BY PROVIDER", "never applied"),
+            json!({"type":"compaction","encrypted_content":"opaque"}),
+        ];
+        let cp = json!({"kind":"provider_native","prefix_items":1,"prefix_sha256":digest(&original[..1]).unwrap(),"settings_sha256":"settings","model_items":canonical});
+        let restored_window = restored(&original, vec![cp.clone()], "settings").unwrap();
+        let view = restored_window.view(&[]);
+        assert_eq!(view[..2], canonical[..]);
+        assert_eq!(view[2], reply);
+        assert_eq!(view[3]["content"], replaced("second request"));
+        assert_eq!(view[3]["_acp_prompt"], original[2]["_acp_prompt"]);
+        assert_eq!(view[4], reply);
+        assert_eq!(view[5], original[4]);
+        assert_eq!(
+            restored_window.compacted_bytes,
+            Some(crate::media::context_bytes(&canonical).unwrap())
+        );
+        // Input waiting at the boundary is the newest version before it is saved.
+        let waiting = prompt("WAITING ROOM", "waiting request");
+        let view = restored_window.view(std::slice::from_ref(&waiting));
+        assert_eq!(view[..2], canonical[..]);
+        assert_eq!(view[3]["content"], replaced("second request"));
+        assert_eq!(view[5]["content"], replaced("third request"));
+        assert_eq!(view[6], waiting);
+        // Once that input is saved, the same prefix is rebuilt from history.
+        let mut saved = original.clone();
+        saved.extend([waiting.clone(), reply.clone()]);
+        let next = restored(&saved, vec![cp], "settings").unwrap().view(&[]);
+        assert_eq!(next[..7], view[..]);
+        // A server compaction item saved after the checkpoint starts the window.
+        let mut pruned = original[..2].to_vec();
+        pruned.push(json!({"type":"compaction","encrypted_content":"newer"}));
+        pruned.extend(original[2..].iter().cloned());
+        let cp = json!({"kind":"provider_native","prefix_items":1,"prefix_sha256":digest(&pruned[..1]).unwrap(),"settings_sha256":"settings","model_items":canonical});
+        let newer = restored(&pruned, vec![cp], "settings").unwrap();
+        assert_eq!(newer.compacted_bytes, None);
+        let view = newer.view(&[]);
+        assert_eq!(view[0], pruned[2]);
+        assert_eq!(view[1]["content"], replaced("second request"));
+        assert_eq!(view[3], original[4]);
+        assert_eq!(view.len(), 4);
     }
     #[test]
     fn summary_request_never_ends_on_reasoning() {

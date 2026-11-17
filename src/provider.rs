@@ -170,8 +170,14 @@ impl Provider {
             }
             ProviderKind::Anthropic => {
                 let ts:Vec<_>=tools.iter().map(|t|json!({"name":t["name"],"description":t["description"],"input_schema":t["parameters"]})).collect();
-                let mut b = json!({"model":p.model,"system":instructions,"messages":history::messages(p.kind,items)?,"tools":ts,"max_tokens":max,"stream":true});
-                if self.config.context.prompt_caching {
+                let caching = self.config.context.prompt_caching;
+                let messages = if caching {
+                    history::anthropic_cached(items)?
+                } else {
+                    history::messages(p.kind, items)?
+                };
+                let mut b = json!({"model":p.model,"system":instructions,"messages":messages,"tools":ts,"max_tokens":max,"stream":true});
+                if caching {
                     b["system"] = json!([{"type":"text","text":instructions,"cache_control":{"type":"ephemeral"}}]);
                     b["cache_control"] = json!({"type":"ephemeral"});
                 }

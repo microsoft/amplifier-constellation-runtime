@@ -337,7 +337,7 @@ impl Turn<'_> {
                     &self.cancel,
                 )
                 .await;
-            let mut view = match prepared {
+            let view = match prepared {
                 Ok(view) => view,
                 Err(error) => {
                     if let Some(capacity) =
@@ -357,8 +357,8 @@ impl Turn<'_> {
                     return Err(error);
                 }
             };
-            view.items
-                .extend(provider.boundary_inputs.iter().map(|p| p.item.clone()));
+            // The prepared view already ends with the inputs waiting at this
+            // boundary; they count against the same budget.
             let required_bytes = crate::media::context_bytes(&view.items)?;
             let available_bytes = self.config.limits.max_context_bytes - fixed_bytes;
             if required_bytes > available_bytes {
