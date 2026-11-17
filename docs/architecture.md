@@ -145,9 +145,14 @@ remain separate blocks. This is an optional extension, not a standard ACP requir
 
 Before ordinary budget compaction, the model view keeps the newest valid block
 for each key. Older versions retain their original position and retained text.
+Once a provider's canonical window exists, the same holds for the items saved
+after it; the window itself is sent as the provider returned it.
 Other user content, media, assistant output, tool pairs and provider state stay
 in order. Invalid/unmarked content stays unchanged. Original `_acp_prompt` and
 saved content are never rewritten; replay and `session_history` retrieve them.
+Anthropic ties a reasoning block to the exact messages before it. A reply that
+followed a prompt since replaced keeps its text and tool calls in the view,
+without that reasoning; saved history keeps the reply whole.
 Archive hashes and item indexes refer to the durable original transcript.
 Clients must never reuse a key across audiences or put a one-time instruction
 only in the replaceable projection. Metadata grants no tool or source access.

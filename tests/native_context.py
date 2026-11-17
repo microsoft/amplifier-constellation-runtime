@@ -103,6 +103,99 @@ class Tests(unittest.TestCase):
         with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:
             self.assertIn('OLD_SNAPSHOT',db.execute('SELECT items FROM sessions').fetchone()[0])
 
+    def snapshot(self,text,retained):
+        return {'type':'text','text':text,'_meta':{'com.microsoft.amplifier.context-snapshot':{'version':1,'key':'room','retainedText':retained}}}
+    def marked(self,text,retained):
+        return self.c.call('session/prompt',{'sessionId':self.sid,'prompt':[self.snapshot(text,retained)]})['result']['stopReason']
+    def model_requests(self):
+        return [b for p,b in self.server.requests if p in ('/responses','/messages') and not b.get('compaction')]
+    def after_checkpoint(self,kind):
+        # The first prompt alone needs compaction, so every later prompt is
+        # saved after a provider window that already exists.
+        prompts=[('FIRST_SNAPSHOT '+('a'*50000),'first request'),('SECOND_SNAPSHOT '+('b'*10000),'second request'),('THIRD_SNAPSHOT','third request')]
+        self.start(kind)
+        for text,retained in prompts:self.assertEqual(self.marked(text,retained),'end_turn')
+        with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:
+            saved=[i for i in json.loads(db.execute('SELECT items FROM sessions WHERE id=?',(self.sid,)).fetchone()[0]) if i.get('role')=='user']
+            checkpoints=[json.loads(r[0]) for r in db.execute('SELECT data FROM context_checkpoints')]
+        # Saved history and the client's own blocks are exactly what was sent.
+        self.assertEqual([i['content'] for i in saved],[text for text,_ in prompts])
+        self.assertEqual([i['_acp_prompt'] for i in saved],[[self.snapshot(text,retained)] for text,retained in prompts])
+        self.assertEqual([c['kind'] for c in checkpoints],['provider_native'])
+        self.assertEqual(len([1 for p,b in self.server.requests if p.endswith('/compact') or b.get('compaction')]),1)
+        second,third=self.model_requests()[-2:]
+        # Each prompt is whole while it is the newest one.
+        self.assertIn('SECOND_SNAPSHOT',json.dumps(second))
+        sent=json.dumps(third.get('input') or third['messages'])
+        self.assertNotIn('SECOND_SNAPSHOT',sent)
+        self.assertIn('second request',sent)
+        self.assertIn('THIRD_SNAPSHOT',sent)
+        return checkpoints[0],second,third
+    def cache_marks(self,body):
+        return [(m,b) for m,message in enumerate(body['messages']) for b,block in enumerate(message['content']) if block.get('cache_control')=={'type':'ephemeral'}]
+    def without_marks(self,messages):
+        return [{**m,'content':[{k:v for k,v in block.items() if k!='cache_control'} for block in m['content']]} for m in messages]
+
+    def test_openai_window_keeps_replacing_declared_old_snapshots(self):
+        checkpoint,_,third=self.after_checkpoint('openai')
+        window=[{'role':'user','content':'canonical retained item'},{'type':'compaction','encrypted_content':'PRIVATE_OPAQUE'}]
+        self.assertEqual(checkpoint['model_items'],window)
+        self.assertEqual(third['input'][:2],window)
+
+    def test_anthropic_window_keeps_replacing_declared_old_snapshots_and_keeps_its_cache(self):
+        checkpoint,second,third=self.after_checkpoint('anthropic')
+        signed={'type':'compaction','content':'PRIVATE_SUMMARY','signature':'PRIVATE_SIGNATURE'}
+        self.assertEqual(checkpoint['model_items'],[{'type':'provider_state','provider':'anthropic','message':{'role':'assistant','content':[signed]}}])
+        self.assertEqual(third['messages'][0]['content'][0],signed)
+        self.assertEqual([m['role'] for m in third['messages']],['assistant','user','assistant','user'])
+        # The automatic breakpoint ends each request inside the newest prompt,
+        # which the next prompt replaces. The block before that prompt is the
+        # last one the next turn sends unchanged, and the turn after reads it.
+        self.assertEqual(self.cache_marks(second),[(0,1)])
+        self.assertEqual(self.cache_marks(third),[(0,1),(2,0)])
+        self.assertEqual(self.without_marks(third['messages'])[0],self.without_marks(second['messages'])[0])
+        self.assertEqual(third['cache_control'],{'type':'ephemeral'})
+        self.assertEqual(third['system'][0]['cache_control'],{'type':'ephemeral'})
+
+    def test_reasoning_bound_to_a_replaced_snapshot_is_not_sent_again(self):
+        # The service ties a reasoning block to the exact messages before it.
+        self.server.silent=True
+        _,second,third=self.after_checkpoint('anthropic')
+        reasoning=lambda body:[b for m in body['messages'] for b in m['content'] if b['type']=='thinking']
+        self.assertEqual(len(reasoning(second)),1)
+        # The reply to the summary still follows unchanged messages. The reply
+        # to the second prompt followed text that the third prompt replaced.
+        self.assertEqual(len(reasoning(third)),1)
+        self.assertEqual([m['role'] for m in third['messages']],['assistant','user'])
+        self.assertEqual(third['messages'][0],second['messages'][0])
+        self.assertEqual(self.cache_marks(third),[(1,0)])
+        with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:
+            saved=json.loads(db.execute('SELECT items FROM sessions WHERE id=?',(self.sid,)).fetchone()[0])
+        self.assertEqual([i['message']['content'] for i in saved if i.get('type')=='provider_state'],[[{'type':'thinking','thinking':'','signature':'PRIVATE_REASONING_SIGNATURE'}]]*3)
+
+    def test_waiting_input_refreshes_the_snapshot_it_is_sent_with(self):
+        self.start('anthropic')
+        self.assertEqual(self.marked('FIRST_SNAPSHOT '+('a'*50000),'first request'),'end_turn')
+        started=threading.Event();release=threading.Event();self.server.hold=(started,release)
+        pid=self.c.request('session/prompt',{'sessionId':self.sid,'prompt':[self.snapshot('SECOND_SNAPSHOT','second request')]})
+        self.assertTrue(started.wait(5))
+        waiting=self.c.call('_session/steering',{'sessionId':self.sid,'prompt':[self.snapshot('WAITING_SNAPSHOT','waiting request')],'_meta':{'steering':{'inputId':'waiting','idleBehavior':'promptRequired'}}})
+        self.assertEqual(waiting['result']['outcome'],'injected')
+        release.set();self.assertEqual(self.c.finish(pid)['result']['stopReason'],'end_turn')
+        self.assertEqual(self.marked('THIRD_SNAPSHOT','third request'),'end_turn')
+        with_waiting,later=self.model_requests()[-2:]
+        sent=json.dumps(with_waiting['messages'])
+        self.assertNotIn('SECOND_SNAPSHOT',sent)
+        self.assertIn('second request',sent)
+        self.assertEqual(with_waiting['messages'][-1]['content'],[{'type':'text','text':'WAITING_SNAPSHOT'}])
+        # Once saved, the input is rebuilt in the place it was first sent, so
+        # the request after it starts with the same messages.
+        before=len(with_waiting['messages'])-1
+        self.assertEqual(self.without_marks(later['messages'])[:before],self.without_marks(with_waiting['messages'])[:before])
+        self.assertIn('waiting request',json.dumps(later['messages'][before]))
+        self.assertNotIn('WAITING_SNAPSHOT',json.dumps(later['messages']))
+        self.assertEqual(len([1 for p,b in self.server.requests if b.get('compaction')]),1)
+
     def test_compaction_rejection_records_safe_reason_not_provider_payload(self):
         self.start('openai');self.server.compact_error=True
         self.assertIn('error',self.prompt('Original '+('x'*50000)))

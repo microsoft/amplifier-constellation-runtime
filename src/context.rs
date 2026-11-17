@@ -302,10 +302,53 @@ pub fn prepare(
 /// Optional ACP content-block extension. A producer declares a refreshed view
 /// and the historical request that must remain when a later view supersedes it.
 pub const SNAPSHOT_META: &str = "com.microsoft.amplifier.context-snapshot";
+
+/// The key and retained text of a declared snapshot block. Malformed metadata
+/// declares nothing.
+fn snapshot(part: &Value) -> Option<(&str, &str)> {
+    let meta = &part["_meta"][SNAPSHOT_META];
+    if part["type"] != "text" || meta["version"] != 1 {
+        return None;
+    }
+    let key = meta["key"]
+        .as_str()
+        .filter(|s| !s.is_empty() && s.len() <= 256)?;
+    let retained = meta["retainedText"]
+        .as_str()
+        .filter(|s| !s.is_empty() && s.len() <= 32_768)?;
+    Some((key, retained))
+}
+
+/// A prompt whose text is replaced when a later prompt refreshes its snapshot.
+pub fn carries_snapshot(item: &Value) -> bool {
+    item["role"] == "user"
+        && item["_acp_prompt"]
+            .as_array()
+            .is_some_and(|parts| parts.iter().any(|p| snapshot(p).is_some()))
+}
+
 pub fn refreshed_view(items: &[Value]) -> Vec<Value> {
-    let mut seen = std::collections::HashSet::new();
     let mut view = crate::mcp::model_view(items);
-    for item in view.iter_mut().rev() {
+    project_snapshots(&mut view);
+    view
+}
+
+/// The snapshot projection alone, over items this runtime owns: a whole
+/// transcript, or the saved items that follow a provider's canonical window.
+/// The newest valid block for each key stays; older ones keep their position
+/// and retained text.
+///
+/// Anthropic binds a reasoning block to the exact messages before it. Replacing
+/// an older prompt changes those messages for every reply between that prompt
+/// and the one that refreshed it, so their reasoning is left out of the view:
+/// the provider reports such a block as belonging to a different conversation
+/// and, where it enforces that, refuses the request. Their text and tool calls
+/// stay. Replies after the newest refresh keep their reasoning.
+pub fn project_snapshots(view: &mut [Value]) {
+    let mut newest = std::collections::HashMap::new();
+    // For each replaced prompt, the item that refreshed it.
+    let mut refreshed_at = vec![0; view.len()];
+    for (index, item) in view.iter_mut().enumerate().rev() {
         if item["role"] != "user" {
             continue;
         }
@@ -341,30 +384,19 @@ pub fn refreshed_view(items: &[Value]) -> Vec<Value> {
             continue;
         }
         for (part, output) in parts.iter().zip(content.iter_mut()).rev() {
-            let meta = &part["_meta"][SNAPSHOT_META];
-            if part["type"] != "text"
-                || output["type"] != "input_text"
-                || output["text"] != part["text"]
-                || meta["version"] != 1
-            {
+            if output["type"] != "input_text" || output["text"] != part["text"] {
                 continue;
             }
-            let Some(key) = meta["key"]
-                .as_str()
-                .filter(|s| !s.is_empty() && s.len() <= 256)
-            else {
+            let Some((key, retained)) = snapshot(part) else {
                 continue;
             };
-            let Some(retained) = meta["retainedText"]
-                .as_str()
-                .filter(|s| !s.is_empty() && s.len() <= 32_768)
-            else {
-                continue;
-            };
-            if !seen.insert(key.to_owned()) {
+            if let Some(&later) = newest.get(key) {
                 output["text"] = json!(format!(
                     "Historical request/context (the refreshed projection is supplied later; original text remains in session_history):\n{retained}"
                 ));
+                refreshed_at[index] = refreshed_at[index].max(later);
+            } else {
+                newest.insert(key.to_owned(), index);
             }
         }
         if text_only {
@@ -377,5 +409,15 @@ pub fn refreshed_view(items: &[Value]) -> Vec<Value> {
             );
         }
     }
-    view
+    let mut stale_until = 0;
+    for (index, item) in view.iter_mut().enumerate() {
+        stale_until = stale_until.max(refreshed_at[index]);
+        if index < stale_until
+            && item["type"] == "provider_state"
+            && item["provider"] == "anthropic"
+            && let Some(content) = item["message"]["content"].as_array_mut()
+        {
+            content.retain(|b| b["type"] != "thinking" && b["type"] != "redacted_thinking");
+        }
+    }
 }

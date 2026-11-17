@@ -46,6 +46,57 @@ fn push(messages: &mut Vec<Value>, role: &str, field: &str, part: Value) {
     }
 }
 pub fn messages(kind: ProviderKind, items: &[Value]) -> Result<Vec<Value>> {
+    Ok(wire(kind, items)?.messages)
+}
+
+/// Anthropic messages with the two cache breakpoints a refreshed snapshot
+/// needs. A read lands only where an earlier request placed a breakpoint, and
+/// the automatic one sits at the end of each request: after the newest prompt.
+/// The next prompt replaces that prompt's snapshot text, so every entry this
+/// turn writes ends inside text that will have changed, and the next turn
+/// would write the whole conversation again. The last block before the newest
+/// snapshot prompt is the end of what the next turn sends unchanged, so it is
+/// marked. The same place before the previous snapshot prompt is where the
+/// last turn left that mark: marking it again reads the entry however many
+/// blocks the turn in between added.
+pub fn anthropic_cached(items: &[Value]) -> Result<Vec<Value>> {
+    let Wire {
+        mut messages,
+        snapshot_prompts,
+    } = wire(ProviderKind::Anthropic, items)?;
+    // Reasoning, signed provider blocks and empty text take no marker.
+    let markable = |part: &Value| match part["type"].as_str() {
+        Some("text") => part["text"].as_str().is_some_and(|s| !s.trim().is_empty()),
+        Some("tool_use" | "tool_result" | "image" | "document") => true,
+        _ => false,
+    };
+    for &(message, block) in snapshot_prompts.iter().rev().take(2) {
+        for index in (0..messages.len().min(message + 1)).rev() {
+            let Some(content) = messages[index]["content"].as_array_mut() else {
+                continue;
+            };
+            let end = if index == message {
+                block.min(content.len())
+            } else {
+                content.len()
+            };
+            if let Some(part) = content[..end].iter_mut().rev().find(|part| markable(part)) {
+                part["cache_control"] = json!({"type":"ephemeral"});
+                break;
+            }
+        }
+    }
+    Ok(messages)
+}
+
+/// The provider's messages and, for each prompt that carries a declared
+/// snapshot, where its first block went: (message, block within it).
+struct Wire {
+    messages: Vec<Value>,
+    snapshot_prompts: Vec<(usize, usize)>,
+}
+fn wire(kind: ProviderKind, items: &[Value]) -> Result<Wire> {
+    let mut snapshot_prompts = vec![];
     let calls: HashMap<_, _> = items
         .iter()
         .filter(|v| v["type"] == "function_call")
@@ -79,6 +130,15 @@ pub fn messages(kind: ProviderKind, items: &[Value]) -> Result<Vec<Value>> {
         } else if item["_provider_shadow"] == true {
             continue;
         } else if item["role"] == "user" {
+            if crate::context::carries_snapshot(item) {
+                snapshot_prompts.push(match result.last().filter(|v| v["role"] == "user") {
+                    Some(open) => (
+                        result.len() - 1,
+                        open["content"].as_array().map_or(0, Vec::len),
+                    ),
+                    None => (result.len(), 0),
+                });
+            }
             let parts = crate::media::user_parts(&item["content"])?;
             let mut chat = vec![];
             let mut ollama_images = vec![];
@@ -171,7 +231,10 @@ pub fn messages(kind: ProviderKind, items: &[Value]) -> Result<Vec<Value>> {
             bail!("This session contains a different provider's history; start a new session");
         }
     }
-    Ok(result)
+    Ok(Wire {
+        messages: result,
+        snapshot_prompts,
+    })
 }
 
 pub fn usage(input: &Value, output: &Value, native: &Value) -> Value {
@@ -229,6 +292,109 @@ fn with_tool_images(items: &[Value]) -> Vec<Value> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    use crate::context::SNAPSHOT_META;
+    fn prompt(text: &str) -> Value {
+        json!({"role":"user","content":text,"_acp_prompt":[{"type":"text","text":text,"_meta":{SNAPSHOT_META:{"version":1,"key":"room","retainedText":"request"}}}]})
+    }
+    fn reply(content: Value) -> Value {
+        json!({"type":"provider_state","provider":"anthropic","message":{"role":"assistant","content":content}})
+    }
+    fn marks(messages: &[Value]) -> Vec<(usize, usize)> {
+        let mut found = vec![];
+        for (m, message) in messages.iter().enumerate() {
+            for (b, block) in message["content"].as_array().unwrap().iter().enumerate() {
+                if block.get("cache_control").is_some() {
+                    assert_eq!(block["cache_control"], json!({"type":"ephemeral"}));
+                    found.push((m, b));
+                }
+            }
+        }
+        found
+    }
+    fn unmarked(mut messages: Vec<Value>) -> Vec<Value> {
+        for message in &mut messages {
+            for block in message["content"].as_array_mut().unwrap() {
+                block.as_object_mut().unwrap().remove("cache_control");
+            }
+        }
+        messages
+    }
+    #[test]
+    fn breakpoints_sit_before_the_two_newest_snapshot_prompts() {
+        let thinking = json!({"type":"thinking","thinking":"","signature":"s"});
+        let items = vec![
+            reply(json!([{"type":"compaction","content":"summary","signature":"s"}])),
+            prompt("oldest"),
+            reply(json!([{"type":"text","text":"first answer"}])),
+            json!({"role":"user","content":"an unmarked request"}),
+            reply(json!([{"type":"text","text":"second answer"}, thinking])),
+            prompt("previous"),
+            reply(json!([thinking, {"type":"tool_use","id":"a","name":"clock","input":{}}])),
+            json!({"type":"function_call","call_id":"a","name":"clock","arguments":"{}","_provider_shadow":true}),
+            json!({"type":"function_call_output","call_id":"a","output":"12:00"}),
+            prompt("newest"),
+            reply(json!([thinking, {"type":"text","text":"working"}])),
+        ];
+        let wire = anthropic_cached(&items).unwrap();
+        assert_eq!(
+            wire.iter()
+                .map(|m| m["role"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "assistant",
+                "user",
+                "assistant",
+                "user",
+                "assistant",
+                "user",
+                "assistant",
+                "user",
+                "assistant"
+            ]
+        );
+        // Before "previous": the answer, not the reasoning that ends the reply.
+        // Before "newest": the tool result that opens the same user message.
+        assert_eq!(marks(&wire), [(4, 0), (7, 0)]);
+        assert_eq!(wire[7]["content"][0]["type"], "tool_result");
+        assert_eq!(wire[7]["content"][1]["text"], "newest");
+        // Nothing else about the request differs from the unmarked form.
+        assert_eq!(
+            unmarked(wire),
+            messages(ProviderKind::Anthropic, &items).unwrap()
+        );
+    }
+    #[test]
+    fn nothing_is_marked_without_a_block_that_can_carry_it() {
+        let thinking = json!({"type":"thinking","thinking":"","signature":"s"});
+        let no_snapshots = vec![
+            json!({"role":"user","content":"plain"}),
+            reply(json!([{"type":"text","text":"answer"}])),
+            json!({"role":"user","content":"plain again"}),
+        ];
+        assert_eq!(
+            anthropic_cached(&no_snapshots).unwrap(),
+            messages(ProviderKind::Anthropic, &no_snapshots).unwrap()
+        );
+        // A signed summary, reasoning and empty text cannot carry a marker.
+        let bare = vec![
+            reply(
+                json!([{"type":"compaction","content":"summary","signature":"s"}, thinking, {"type":"text","text":" "}]),
+            ),
+            prompt("first"),
+        ];
+        assert!(marks(&anthropic_cached(&bare).unwrap()).is_empty());
+        // A silent reply leaves two prompts in one message. The first is the
+        // only block before the second, and both marks would fall on it.
+        let silent = vec![prompt("first"), reply(json!([thinking])), prompt("second")];
+        let wire = anthropic_cached(&silent).unwrap();
+        assert_eq!(marks(&wire), [(0, 0)]);
+        assert_eq!(wire[0]["content"][0]["text"], "first");
+    }
 }
 
 #[cfg(test)]
