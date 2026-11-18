@@ -19,6 +19,11 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Explicit local installation-owner reconciliation; never runs or resumes work.
+    ReconcileNativeTools {
+        #[command(subcommand)]
+        command: ReconcileNativeTools,
+    },
     /// Discover local helper input versions; no installation or model is used.
     HelperCapabilities,
     /// Classify continuation from trusted host observations; never executes work.
@@ -131,6 +136,23 @@ enum Command {
     },
     Events {
         session: String,
+    },
+}
+#[derive(Subcommand)]
+enum ReconcileNativeTools {
+    /// Inspect existing evidence and print a plan without changing stored state.
+    Prepare {
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        previous_config: PathBuf,
+    },
+    /// Apply a reviewed plan once, refusing any changed evidence or session state.
+    Apply { plan: PathBuf },
+    /// Read the durable result of an operation, including after a lost reply.
+    Inspect {
+        #[arg(long)]
+        operation: String,
     },
 }
 #[derive(clap::Args)]
@@ -267,6 +289,21 @@ async fn main() -> Result<()> {
     let home = args
         .home
         .context("Supply --home for this agent installation")?;
+    if let Command::ReconcileNativeTools { command } = &args.command {
+        use agent_runtime::native_tools_reconciliation as reconciliation;
+        let result = match command {
+            ReconcileNativeTools::Prepare {
+                session,
+                previous_config,
+            } => serde_json::to_value(reconciliation::prepare(&home, session, previous_config)?)?,
+            ReconcileNativeTools::Apply { plan } => reconciliation::apply(&home, plan)?,
+            ReconcileNativeTools::Inspect { operation } => {
+                reconciliation::inspect(&home, operation)?
+            }
+        };
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
     if let Command::Init {
         workspace,
         name,
@@ -474,6 +511,7 @@ async fn main() -> Result<()> {
         | Command::ConfigSchema
         | Command::ConfigInspect
         | Command::ConfigValidate { .. }
+        | Command::ReconcileNativeTools { .. }
         | Command::Configure { .. }
         | Command::ChatgptSignIn { .. }
         | Command::ChatgptStatus
