@@ -86,3 +86,74 @@ fn mcp_images_are_visual_evidence_never_remote_publication_instructions() {
     assert!(media::mcp_observations(json!({"content":[{"type":"image","mimeType":"image/png","data":STANDARD.encode(b"text") }]})).is_err());
     assert!(media::mcp_observations(json!({"content":vec![image;5]})).is_err());
 }
+
+#[tokio::test]
+async fn attaches_named_workspace_document_bytes_only_from_granted_roots() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("work");
+    std::fs::create_dir(&root).unwrap();
+    let config = Config::initial(root.clone(), "fixture".into(), "fixture".into());
+    let name = "05-évidence & acceptance.md";
+    let text = "# Evidence\r\n\nLast line — intact.\n";
+    std::fs::write(root.join(name), text).unwrap();
+    let result = tools::call(
+        &config,
+        &root,
+        "workspace_attach_file",
+        &json!({"path":name}),
+    )
+    .await
+    .unwrap();
+    let block = &result["_acp_content"][0]["resource"];
+    assert_eq!(block["text"], text);
+    assert_eq!(block["mimeType"], "text/markdown");
+    let uri = reqwest::Url::parse(block["uri"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        uri.query_pairs().find(|(k, _)| k == "name").unwrap().1,
+        name
+    );
+    assert!(!uri.as_str().contains(root.to_str().unwrap()));
+    for (path, bytes) in [
+        ("large.md", vec![b'x'; 200_001]),
+        ("invalid.md", vec![255]),
+        ("binary.md", vec![0]),
+        ("executable.sh", vec![b'x']),
+    ] {
+        std::fs::write(root.join(path), bytes).unwrap();
+        assert!(
+            tools::call(
+                &config,
+                &root,
+                "workspace_attach_file",
+                &json!({"path":path})
+            )
+            .await
+            .is_err()
+        );
+    }
+    std::fs::write(temp.path().join("private.md"), "private").unwrap();
+    assert!(
+        tools::call(
+            &config,
+            &root,
+            "workspace_attach_file",
+            &json!({"path":"../private.md"})
+        )
+        .await
+        .is_err()
+    );
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(temp.path().join("private.md"), root.join("alias.md")).unwrap();
+        assert!(
+            tools::call(
+                &config,
+                &root,
+                "workspace_attach_file",
+                &json!({"path":"alias.md"})
+            )
+            .await
+            .is_err()
+        );
+    }
+}

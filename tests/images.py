@@ -66,6 +66,33 @@ class Tests(unittest.TestCase):
   result=c.call('session/prompt',{'sessionId':sid,'prompt':[{'type':'text','text':'Show the requested saved image in this conversation.'}]})
   self.assertNotIn('error',result)
   return [u['params']['update'] for u in c.updates if u['params']['update'].get('sessionUpdate')=='agent_message_chunk' and u['params']['update'].get('content',{}).get('type')=='image']
+ def test_named_document_roundtrip_and_session_load(self):
+  with tempfile.TemporaryDirectory() as d:
+   name='03-lifecycle – R1.md'
+   body=('# Lifecycle\r\n' + 'A complete paragraph.\n' * 400 + 'Final line.\r\n').encode()
+   action={'name':'workspace_attach_file','arguments':json.dumps({'path':name})}
+   server,home,work,client,sid=self.fixture(d,'read_only',[action])
+   (work/name).write_bytes(body)
+   result=client.call('session/prompt',{'sessionId':sid,'prompt':[{'type':'text','text':'Attach the saved Markdown draft.'}]})
+   self.assertNotIn('error',result)
+   def resources(client):
+    return [u['params']['update']['content']['resource'] for u in client.updates if u['params']['update'].get('sessionUpdate')=='agent_message_chunk' and u['params']['update'].get('content',{}).get('type')=='resource']
+   from urllib.parse import parse_qs,urlparse
+   sent=resources(client)
+   self.assertEqual(len(sent),1)
+   self.assertEqual(sent[0]['text'].encode(),body)
+   self.assertEqual(sent[0]['mimeType'],'text/markdown')
+   self.assertEqual(parse_qs(urlparse(sent[0]['uri']).query),{'name':[name]})
+   self.assertFalse(client.callbacks)
+   count=len(server.requests)
+   resumed=Client(home)
+   try:
+    resumed.call('initialize',{'protocolVersion':1,'clientCapabilities':{}})
+    result=resumed.call('session/load',{'sessionId':sid,'cwd':str(work),'mcpServers':[]})
+    self.assertNotIn('error',result)
+    self.assertEqual(resources(resumed),[])
+    self.assertEqual(len(server.requests),count)
+   finally:resumed.close()
  def test_image_output_does_not_authorize_writes_or_external_tools(self):
   for mode in ['ask','read_only']:
    with self.subTest(mode=mode),tempfile.TemporaryDirectory() as d:

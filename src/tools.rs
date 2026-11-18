@@ -51,6 +51,12 @@ fn definitions_for_boundary(
             vec!["path"],
         ),
         definition(
+            "workspace_attach_file",
+            "Attach an existing UTF-8 Markdown, plain text, CSV or JSON document from your granted workspace to the current conversation. Use when asked to share the actual file. Sends its original bytes and filename as response output, without copying text into the answer. Maximum 200,000 bytes per document. The receiving client controls delivery.",
+            json!({"path":{"type":"string"}}),
+            vec!["path"],
+        ),
+        definition(
             "workspace_write",
             "Write a UTF-8 file in the workspace. Requires the session's write permission. Parent folders are created as needed.",
             json!({"path":{"type":"string"},"content":{"type":"string"}}),
@@ -239,7 +245,7 @@ pub async fn call(c: &Config, cwd: &Path, name: &str, args: &Value) -> Result<Va
     let (root, p) = relative(c, cwd, args["path"].as_str().context("Missing path")?)?;
     let root = Dir::open_ambient_dir(root, cap_std::ambient_authority())?;
     match name {
-        "workspace_view_image" | "workspace_attach_image" => {
+        "workspace_view_image" | "workspace_attach_image" | "workspace_attach_file" => {
             use base64::Engine;
             use std::io::Read;
             let mut options = OpenOptions::new();
@@ -249,19 +255,51 @@ pub async fn call(c: &Config, cwd: &Path, name: &str, args: &Value) -> Result<Va
                 use cap_std::fs::OpenOptionsExt;
                 options.custom_flags(libc::O_NONBLOCK);
             }
-            let f = root.open_with(p, &options)?;
+            let f = root.open_with(&p, &options)?;
             ensure!(
                 f.metadata()?.is_file(),
-                "Only regular image files can be read"
+                "Only regular files can be attached or viewed"
             );
-            const MAX_IMAGE: u64 = 2 * 1024 * 1024;
-            ensure!(
-                f.metadata()?.len() <= MAX_IMAGE,
-                "Image exceeds 2 MiB limit"
-            );
+            let document = name == "workspace_attach_file";
+            let (limit, size_error) = if document {
+                (200_000, "Document exceeds 200,000 byte limit")
+            } else {
+                (2 * 1024 * 1024, "Image exceeds 2 MiB limit")
+            };
+            ensure!(f.metadata()?.len() <= limit, "{size_error}");
             let mut bytes = Vec::new();
-            f.take(MAX_IMAGE + 1).read_to_end(&mut bytes)?;
-            ensure!(bytes.len() as u64 <= MAX_IMAGE, "Image exceeds 2 MiB limit");
+            f.take(limit + 1).read_to_end(&mut bytes)?;
+            ensure!(bytes.len() as u64 <= limit, "{size_error}");
+            if document {
+                let filename = p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .context("Missing UTF-8 filename")?;
+                let extension = p
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                let mime = match extension.as_str() {
+                    "md" | "markdown" => "text/markdown",
+                    "txt" => "text/plain",
+                    "csv" => "text/csv",
+                    "json" => "application/json",
+                    _ => bail!("Choose a Markdown, TXT, CSV or JSON document"),
+                };
+                let text = std::str::from_utf8(&bytes).context("Document must be UTF-8")?;
+                ensure!(
+                    !text.is_empty() && !text.contains('\0'),
+                    "Choose a nonempty UTF-8 document"
+                );
+                let mut uri = reqwest::Url::parse("attachment:///document")?;
+                uri.query_pairs_mut().append_pair("name", filename);
+                let block = json!({"type":"resource","resource":{"uri":uri.as_str(),"mimeType":mime,"text":text}});
+                return Ok(
+                    json!({"filename":filename,"bytes":bytes.len(),"mime_type":mime,
+                    "attached_to_current_conversation":true, "_acp_content":[block]}),
+                );
+            }
             let mime = crate::media::image_mime(&bytes)?;
             let image = json!({"type":"image","mimeType":mime,"data":base64::engine::general_purpose::STANDARD.encode(&bytes)});
             let key = if name == "workspace_attach_image" {
