@@ -3,6 +3,7 @@
 use crate::config::ProviderKind;
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
 pub fn text_item(text: &str) -> Value {
@@ -63,6 +64,7 @@ pub fn anthropic_cached(items: &[Value]) -> Result<Vec<Value>> {
     let Wire {
         mut messages,
         snapshot_prompts,
+        ..
     } = wire(ProviderKind::Anthropic, items)?;
     // Reasoning, signed provider blocks and empty text take no marker.
     let markable = |part: &Value| match part["type"].as_str() {
@@ -89,14 +91,142 @@ pub fn anthropic_cached(items: &[Value]) -> Result<Vec<Value>> {
     Ok(messages)
 }
 
-/// The provider's messages and, for each prompt that carries a declared
-/// snapshot, where its first block went: (message, block within it).
+/// Saved with each Anthropic reply: a digest of what it was produced after.
+pub const FOLLOWS: &str = "_follows_sha256";
+
+fn reasoning(block: &Value) -> bool {
+    matches!(
+        block["type"].as_str(),
+        Some("thinking" | "redacted_thinking")
+    )
+}
+
+/// Parsed JSON as content: key order and formatting do not change the digest.
+fn feed(hash: &mut Sha256, value: &Value) {
+    match value {
+        Value::Object(map) => {
+            let mut entries: Vec<_> = map.iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(b.0));
+            hash.update(b"{");
+            for (key, value) in entries {
+                hash.update(Value::from(key.as_str()).to_string());
+                hash.update(b":");
+                feed(hash, value);
+                hash.update(b",");
+            }
+            hash.update(b"}");
+        }
+        Value::Array(values) => {
+            hash.update(b"[");
+            for value in values {
+                feed(hash, value);
+                hash.update(b",");
+            }
+            hash.update(b"]");
+        }
+        scalar => hash.update(scalar.to_string()),
+    }
+}
+pub fn digest(value: &Value) -> String {
+    let mut hash = Sha256::new();
+    feed(&mut hash, value);
+    format!("{:x}", hash.finalize())
+}
+
+/// What each Anthropic reply in `items` follows when the items are sent after
+/// `settings` (the instructions and tools): one digest per reply, in order,
+/// then the digest of the whole request, which is what its own reply follows.
+///
+/// Anthropic ties a reasoning block to the instructions, the tools and every
+/// earlier message, and checks each block against its own record. These
+/// digests cover the same content. Reasoning blocks are not part of it: the
+/// oldest ones can be left out without changing what a later block follows.
+pub fn anthropic_prefixes(settings: &str, items: &[Value]) -> Result<(Vec<String>, String)> {
+    let Wire {
+        messages, replies, ..
+    } = wire(ProviderKind::Anthropic, items)?;
+    // A reply's first block as an index into all blocks of the request.
+    let mut before = Vec::with_capacity(messages.len() + 1);
+    let mut blocks = 0;
+    for message in &messages {
+        before.push(blocks);
+        blocks += message["content"].as_array().map_or(0, Vec::len);
+    }
+    before.push(blocks);
+    let mut starts = replies
+        .iter()
+        .map(|&(message, block)| before[message.min(messages.len())] + block)
+        .peekable();
+    let mut found = Vec::with_capacity(replies.len());
+    let mut state = settings.to_owned();
+    let mut seen = 0;
+    for message in &messages {
+        for block in message["content"].as_array().into_iter().flatten() {
+            while starts.next_if(|&at| at <= seen).is_some() {
+                found.push(state.clone());
+            }
+            seen += 1;
+            if reasoning(block) {
+                continue;
+            }
+            let mut hash = Sha256::new();
+            hash.update(&state);
+            hash.update(message["role"].as_str().unwrap_or(""));
+            feed(&mut hash, block);
+            state = format!("{:x}", hash.finalize());
+        }
+    }
+    found.extend(starts.map(|_| state.clone()));
+    Ok((found, state))
+}
+
+/// Leaves out of a model view the reasoning that would be sent after anything
+/// other than what it was produced with: changed instructions or tools, a
+/// provider window that can no longer be used, an archive note in place of
+/// earlier turns, a prompt since replaced. A reply saved without a record is
+/// treated the same way. The provider accepts reasoning only as an unbroken
+/// run, so every block up to the last such reply goes. Text, tool calls and
+/// saved history are unchanged.
+pub fn keep_bound_reasoning(settings: &str, items: &mut [Value]) {
+    // Items this provider cannot be sent fail in the request itself.
+    let Ok((prefixes, _)) = anthropic_prefixes(settings, items) else {
+        return;
+    };
+    let replies: Vec<usize> = (0..items.len())
+        .filter(|&index| items[index]["type"] == "provider_state")
+        .collect();
+    let moved = replies.iter().zip(&prefixes).rposition(|(&index, prefix)| {
+        items[index][FOLLOWS] != *prefix
+            && items[index]["message"]["content"]
+                .as_array()
+                .is_some_and(|content| content.iter().any(reasoning))
+    });
+    for &index in &replies[..moved.map_or(0, |last| last + 1)] {
+        if let Some(content) = items[index]["message"]["content"].as_array_mut() {
+            content.retain(|block| !reasoning(block));
+        }
+    }
+}
+
+/// The provider's messages and where two kinds of item went, as (message,
+/// block within it): the first block of each prompt that carries a declared
+/// snapshot, and the first block of each saved reply.
 struct Wire {
     messages: Vec<Value>,
     snapshot_prompts: Vec<(usize, usize)>,
+    replies: Vec<(usize, usize)>,
 }
 fn wire(kind: ProviderKind, items: &[Value]) -> Result<Wire> {
     let mut snapshot_prompts = vec![];
+    let mut replies = vec![];
+    // Where the next block of `role` will go.
+    let next = |result: &[Value], role: &str| match result.last().filter(|v| v["role"] == role) {
+        Some(open) => (
+            result.len() - 1,
+            open["content"].as_array().map_or(0, Vec::len),
+        ),
+        None => (result.len(), 0),
+    };
     let calls: HashMap<_, _> = items
         .iter()
         .filter(|v| v["type"] == "function_call")
@@ -111,6 +241,7 @@ fn wire(kind: ProviderKind, items: &[Value]) -> Result<Wire> {
             );
             let message = &item["message"];
             if kind == ProviderKind::Anthropic {
+                replies.push(next(&result, "assistant"));
                 for part in message["content"]
                     .as_array()
                     .context("Invalid saved Anthropic content")?
@@ -131,13 +262,7 @@ fn wire(kind: ProviderKind, items: &[Value]) -> Result<Wire> {
             continue;
         } else if item["role"] == "user" {
             if crate::context::carries_snapshot(item) {
-                snapshot_prompts.push(match result.last().filter(|v| v["role"] == "user") {
-                    Some(open) => (
-                        result.len() - 1,
-                        open["content"].as_array().map_or(0, Vec::len),
-                    ),
-                    None => (result.len(), 0),
-                });
+                snapshot_prompts.push(next(&result, "user"));
             }
             let parts = crate::media::user_parts(&item["content"])?;
             let mut chat = vec![];
@@ -234,6 +359,7 @@ fn wire(kind: ProviderKind, items: &[Value]) -> Result<Wire> {
     Ok(Wire {
         messages: result,
         snapshot_prompts,
+        replies,
     })
 }
 
@@ -248,7 +374,6 @@ pub fn responses(items: &[Value]) -> Vec<Value> {
     with_tool_images(items).iter().filter(|item|item["_computer_interrupted"]!=true).map(|item|{
         if item["type"]=="image_generation_call" {
             if let Some(data)=item["result"].as_str(){
-                use sha2::{Digest,Sha256};
                 let mime=match item["output_format"].as_str(){Some("jpeg")=>"image/jpeg",Some("webp")=>"image/webp",_=>"image/png"};
                 return json!({"role":"user","content":[{"type":"input_text","text":format!("Retained image previously generated by this agent. Artifact ID: {:x}. This is prior output, not a new user request.",Sha256::digest(data.as_bytes()))},{"type":"input_image","image_url":format!("data:{mime};base64,{data}")}]});
             }
@@ -292,6 +417,185 @@ fn with_tool_images(items: &[Value]) -> Vec<Value> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+    fn reply(content: Value) -> Value {
+        json!({"type":"provider_state","provider":"anthropic","message":{"role":"assistant","content":content}})
+    }
+    fn thinking(signature: &str) -> Value {
+        json!({"type":"thinking","thinking":"","signature":signature})
+    }
+    /// Saves a reply the way a completed request does: with what it followed.
+    fn produced(settings: &str, items: &mut Vec<Value>, mut reply: Value) {
+        reply[FOLLOWS] = json!(anthropic_prefixes(settings, items).unwrap().1);
+        items.push(reply);
+    }
+    fn types(item: &Value) -> Vec<&str> {
+        item["message"]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|block| block["type"].as_str().unwrap())
+            .collect()
+    }
+    fn conversation() -> Vec<Value> {
+        let mut items = vec![json!({"role":"user","content":"first"})];
+        produced(
+            "settings",
+            &mut items,
+            reply(json!([thinking("a"), {"type":"tool_use","id":"t","name":"clock","input":{}}])),
+        );
+        items.extend([
+            json!({"type":"function_call","call_id":"t","name":"clock","arguments":"{}","_provider_shadow":true}),
+            json!({"type":"function_call_output","call_id":"t","output":"12:00"}),
+        ]);
+        produced(
+            "settings",
+            &mut items,
+            reply(json!([thinking("b"), {"type":"text","text":"done"}])),
+        );
+        items.push(json!({"role":"user","content":"second"}));
+        produced(
+            "settings",
+            &mut items,
+            reply(json!([thinking("c"), {"type":"text","text":"again"}])),
+        );
+        items
+    }
+    #[test]
+    fn a_reply_sent_after_what_it_was_produced_with_keeps_its_reasoning() {
+        let items = conversation();
+        let (prefixes, _) = anthropic_prefixes("settings", &items).unwrap();
+        let saved: Vec<_> = [1, 4, 6].map(|index| items[index][FOLLOWS].clone()).into();
+        assert_eq!(json!(prefixes), json!(saved));
+        let mut view = items.clone();
+        keep_bound_reasoning("settings", &mut view);
+        assert_eq!(view, items);
+        // The record is not content: it is not sent and not counted.
+        let mut unrecorded = items.clone();
+        for index in [1, 4, 6] {
+            unrecorded[index].as_object_mut().unwrap().remove(FOLLOWS);
+        }
+        assert_eq!(
+            messages(ProviderKind::Anthropic, &unrecorded).unwrap(),
+            messages(ProviderKind::Anthropic, &items).unwrap()
+        );
+        assert_eq!(
+            crate::media::context_bytes(&unrecorded).unwrap(),
+            crate::media::context_bytes(&items).unwrap()
+        );
+        // Reasoning left out, a field the provider is never sent and the
+        // order of keys are not what a later block follows.
+        let mut same = items.clone();
+        same[1]["message"]["content"]
+            .as_array_mut()
+            .unwrap()
+            .remove(0);
+        same[1]["_acp_content"] = json!([{"type":"text","text":"a downloaded file"}]);
+        same[3] = serde_json::from_str(
+            r#"{"output":"12:00","call_id":"t","type":"function_call_output"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            anthropic_prefixes("settings", &same).unwrap().0[1..],
+            prefixes[1..]
+        );
+        assert_eq!(
+            digest(&json!({"a":1,"b":[{"c":"x","d":null}]})),
+            digest(&serde_json::from_str(r#"{"b":[{"d":null,"c":"x"}],"a":1}"#).unwrap())
+        );
+        assert_ne!(digest(&json!({"a":"1"})), digest(&json!({"a":1})));
+    }
+    #[test]
+    fn reasoning_sent_after_anything_else_is_left_out_with_all_before_it() {
+        let items = conversation();
+        // Other instructions or tools precede everything.
+        let mut view = items.clone();
+        keep_bound_reasoning("other settings", &mut view);
+        assert_eq!(types(&view[1]), ["tool_use"]);
+        assert_eq!(types(&view[4]), ["text"]);
+        assert_eq!(types(&view[6]), ["text"]);
+        for index in [0, 2, 3, 5] {
+            assert_eq!(view[index], items[index]);
+        }
+        // An archive note in place of the first turn: the reply after it
+        // followed that turn.
+        let mut view = vec![json!({"role":"user","content":"Saved conversation archive"})];
+        view.extend_from_slice(&items[5..]);
+        keep_bound_reasoning("settings", &mut view);
+        assert_eq!(types(&view[2]), ["text"]);
+        // A change after the first two replies. They still follow what they
+        // did, but the provider takes reasoning only as an unbroken run that
+        // ends with the newest block, so they lose theirs as well.
+        let mut view = items.clone();
+        view[5]["content"] = json!("second, reworded");
+        keep_bound_reasoning("settings", &mut view);
+        assert_eq!(types(&view[1]), ["tool_use"]);
+        assert_eq!(types(&view[4]), ["text"]);
+        assert_eq!(types(&view[6]), ["text"]);
+        // A reply produced from that view is kept in the views after it.
+        view.push(json!({"role":"user","content":"third"}));
+        produced(
+            "settings",
+            &mut view,
+            reply(json!([thinking("d"), {"type":"text","text":"more"}])),
+        );
+        let mut next = items.clone();
+        next[5]["content"] = json!("second, reworded");
+        next.extend_from_slice(&view[7..]);
+        keep_bound_reasoning("settings", &mut next);
+        assert_eq!(next, view);
+    }
+    #[test]
+    fn a_reply_without_a_record_loses_its_reasoning_and_a_window_needs_none() {
+        // Saved by a version that kept no record.
+        let mut items = conversation();
+        items[4].as_object_mut().unwrap().remove(FOLLOWS);
+        keep_bound_reasoning("settings", &mut items);
+        assert_eq!(types(&items[1]), ["tool_use"]);
+        assert_eq!(types(&items[4]), ["text"]);
+        assert_eq!(types(&items[6]), ["thinking", "text"]);
+        // A provider's window has no reasoning and no record. The reply after
+        // it shares its message and follows the signed block.
+        let mut items = vec![reply(
+            json!([{"type":"compaction","content":"summary","signature":"s"}]),
+        )];
+        produced(
+            "settings",
+            &mut items,
+            reply(json!([thinking("a"), {"type":"text","text":"done"}])),
+        );
+        // A silent reply has no block of its own.
+        produced("settings", &mut items, reply(json!([])));
+        items.push(json!({"role":"user","content":"next"}));
+        produced(
+            "settings",
+            &mut items,
+            reply(json!([thinking("b"), {"type":"text","text":"more"}])),
+        );
+        let wire = messages(ProviderKind::Anthropic, &items).unwrap();
+        assert_eq!(wire.len(), 3);
+        assert_eq!(wire[0]["content"].as_array().unwrap().len(), 3);
+        let mut view = items.clone();
+        keep_bound_reasoning("settings", &mut view);
+        assert_eq!(view, items);
+        // Without the window the same replies follow something else.
+        let mut view = vec![json!({"role":"user","content":"the saved transcript"})];
+        view.extend_from_slice(&items[1..]);
+        keep_bound_reasoning("settings", &mut view);
+        assert_eq!(types(&view[1]), ["text"]);
+        assert_eq!(types(&view[4]), ["text"]);
+        // Another provider's state is not this provider's to judge.
+        let other = vec![
+            json!({"type":"provider_state","provider":"gemini","message":{"parts":[{"thought":true,"text":"kept"}]}}),
+        ];
+        let mut view = other.clone();
+        keep_bound_reasoning("settings", &mut view);
+        assert_eq!(view, other);
+    }
 }
 
 #[cfg(test)]

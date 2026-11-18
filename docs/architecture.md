@@ -152,7 +152,9 @@ in order. Invalid/unmarked content stays unchanged. Original `_acp_prompt` and
 saved content are never rewritten; replay and `session_history` retrieve them.
 Anthropic ties a reasoning block to the exact messages before it. A reply that
 followed a prompt since replaced keeps its text and tool calls in the view,
-without that reasoning; saved history keeps the reply whole.
+without that reasoning; saved history keeps the reply whole. The same holds for
+reasoning that followed other instructions, tools or earlier turns: see
+[working context and compaction](context.md#working-context-and-compaction).
 Archive hashes and item indexes refer to the durable original transcript.
 Clients must never reuse a key across audiences or put a one-time instruction
 only in the replaceable projection. Metadata grants no tool or source access.

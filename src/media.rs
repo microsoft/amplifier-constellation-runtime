@@ -262,7 +262,8 @@ pub fn context_bytes(items: &[Value]) -> Result<usize> {
                     return 8192;
                 }
                 o.iter()
-                    .filter(|(k, _)| *k != "_acp_prompt")
+                    // Kept beside the content and never sent to a provider.
+                    .filter(|(k, _)| *k != "_acp_prompt" && *k != crate::provider::FOLLOWS)
                     .map(|(k, v)| {
                         if k == "result" && o.get("type") == Some(&json!("image_generation_call")) {
                             8192

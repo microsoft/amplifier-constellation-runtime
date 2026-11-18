@@ -11,6 +11,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail, ensure};
 use futures_util::StreamExt;
+pub(crate) use history::FOLLOWS;
 use serde_json::{Value, json};
 use stream::{Collector, Frames};
 use tokio_util::sync::CancellationToken;
@@ -129,6 +130,12 @@ impl Provider {
             }
         }
         Ok(request)
+    }
+    /// What a request sends before its messages: the instructions and the
+    /// tools as this provider receives them.
+    fn request_settings(&self, instructions: &str, tools: &[Value]) -> Result<String> {
+        let (_, body) = self.request(instructions, &[], tools)?;
+        Ok(history::digest(&json!([instructions, body["tools"]])))
     }
     fn request(
         &self,
@@ -355,8 +362,21 @@ impl Provider {
         let mut result = self
             .complete_inner(instructions, items, tools, peer, cancel, inbox.clone())
             .await;
-        if let Ok(response) = &result {
+        if let Ok(response) = &mut result {
             self.context_tokens = compaction::context_tokens(&response["usage"]);
+            // The reply keeps a record of what it was produced after, so a
+            // later view can tell whether its reasoning still follows that.
+            if self.config.provider.kind == ProviderKind::Anthropic
+                && let Some(reply) = response["output"]
+                    .as_array_mut()
+                    .and_then(|output| output.first_mut())
+                    .filter(|item| item["type"] == "provider_state")
+                && let Ok((_, request)) = self
+                    .request_settings(instructions, tools)
+                    .and_then(|settings| history::anthropic_prefixes(&settings, items))
+            {
+                reply[history::FOLLOWS] = json!(request);
+            }
         }
         if result.is_err()
             && (self.config.provider.kind != ProviderKind::Openai || self.websocket.is_none())

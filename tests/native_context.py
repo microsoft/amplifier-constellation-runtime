@@ -1,10 +1,30 @@
 """Real ACP/provider boundaries: canonical windows, signed state and history."""
-import json, sqlite3, subprocess, tempfile, threading, unittest
+import hashlib, json, sqlite3, subprocess, tempfile, threading, unittest, unittest.mock
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from contextlib import closing
 import protocol
 from responses_ws import ResponsesWebSocketMixin
+
+def digest(value):return hashlib.sha256(json.dumps(value,sort_keys=True).encode()).hexdigest()[:24]
+def followed(body):
+    """What the live service ties each reasoning block of a request to: the
+    instructions, the tools and every earlier block. Reasoning blocks and cache
+    markers are not part of that. Returns the first block sent after anything
+    else, or after another reasoning block than the one it was produced after,
+    then what a reply to the whole request follows."""
+    system=body.get('system') or ''
+    earlier=[system if isinstance(system,str) else ''.join(b['text'] for b in system),body.get('tools')];previous=None;refused=None
+    for m,message in enumerate(body['messages']):
+        for b,block in enumerate(message['content']):
+            if block['type']!='thinking':
+                earlier.append([message['role'],{k:v for k,v in block.items() if k!='cache_control'}]);continue
+            kind,_,record=block['signature'].partition(' ')
+            if kind=='BOUND':
+                after,_,chained=record.partition(' ')
+                if refused is None and (after!=digest(earlier) or previous not in (None,chained)):refused=(m,b)
+            previous=digest(block['signature'])
+    return refused,f'BOUND {digest(earlier)} {previous}'
 
 class Handler(ResponsesWebSocketMixin,BaseHTTPRequestHandler):
     def log_message(self,*args):pass
@@ -26,6 +46,10 @@ class Handler(ResponsesWebSocketMixin,BaseHTTPRequestHandler):
             retained=body['input'][0]['content'] if self.server.retain_large_input else 'canonical retained item'
             window=getattr(self.server,'mcp_window',None)
             return self.reply({'output':window if window is not None else [{'role':'user','content':retained},{'type':'compaction','encrypted_content':'PRIVATE_OPAQUE'}],'usage':{'input_tokens':14000,'output_tokens':200}})
+        refused,signature=followed(body) if self.server.bound else (None,None)
+        if refused:
+            # The live service refuses this request shape with exactly this error.
+            return self.reply({'type':'error','error':{'type':'invalid_request_error','message':'messages.%d.content.%d: Invalid `signature` in `thinking` block. The block is bound to a different conversation. Remove the block, or set `thinking.block_binding.prefix_mismatch_behavior` to "drop_block".'%refused}},400)
         if body.get('compaction'):
             last=body['messages'][-1]
             if last['role']=='assistant' and last['content'][-1]['type'] in ('thinking','redacted_thinking'):
@@ -44,6 +68,12 @@ class Handler(ResponsesWebSocketMixin,BaseHTTPRequestHandler):
         reported=self.server.reported_tokens
         if self.path=='/responses':
             events=[{'type':'response.completed','response':{'status':'completed','output':[{'type':'message','role':'assistant','content':[{'type':'output_text','text':'Finished'}]}],'usage':{'input_tokens':reported,'output_tokens':20,'input_tokens_details':{'cached_tokens':256}}}}]
+        elif self.server.bound:
+            # Reasoning tied to this request, then the next scripted tool call or a final text.
+            call=self.server.script.pop(0) if self.server.script else None
+            block=[{'type':'content_block_start','index':0,'content_block':{'type':'thinking','thinking':'','signature':''}},{'type':'content_block_delta','index':0,'delta':{'type':'signature_delta','signature':signature}},{'type':'content_block_stop','index':0}]
+            block+=[{'type':'content_block_start','index':1,'content_block':{'type':'tool_use','id':f'call-{len(self.server.requests)}','name':call,'input':{}}},{'type':'content_block_delta','index':1,'delta':{'type':'input_json_delta','partial_json':''}}] if call else [{'type':'content_block_start','index':1,'content_block':{'type':'text','text':'Finished'}}]
+            events=[{'type':'message_start','message':{'usage':{'input_tokens':reported,'output_tokens':0,'cache_read_input_tokens':256}}},*block,{'type':'content_block_stop','index':1},{'type':'message_delta','delta':{'stop_reason':'tool_use' if call else 'end_turn'},'usage':{'output_tokens':20}},{'type':'message_stop'}]
         else:
             # A reply with reasoning and no text is how a model stays silent.
             block=[{'type':'content_block_start','index':0,'content_block':{'type':'thinking','thinking':'','signature':''}},{'type':'content_block_delta','index':0,'delta':{'type':'signature_delta','signature':'PRIVATE_REASONING_SIGNATURE'}}] if self.server.silent else [{'type':'content_block_start','index':0,'content_block':{'type':'text','text':'Finished'}}]
@@ -54,17 +84,18 @@ class Handler(ResponsesWebSocketMixin,BaseHTTPRequestHandler):
 class Tests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.home=Path(self.tmp.name)/'home';self.work=Path(self.tmp.name)/'work';self.c=None
-        self.server=ThreadingHTTPServer(('127.0.0.1',0),Handler);self.server.requests=[];self.server.discovered=[];self.server.bad_compaction=False;self.server.truncate=False;self.server.retain_large_input=False;self.server.compact_error=False;self.server.silent=False;self.server.reported_tokens=400;self.server.hold=None
+        self.server=ThreadingHTTPServer(('127.0.0.1',0),Handler);self.server.requests=[];self.server.discovered=[];self.server.bad_compaction=False;self.server.truncate=False;self.server.retain_large_input=False;self.server.compact_error=False;self.server.silent=False;self.server.reported_tokens=400;self.server.hold=None;self.server.bound=False;self.server.script=[]
         threading.Thread(target=self.server.serve_forever,daemon=True).start()
     def tearDown(self):
         if self.c:self.c.close()
         self.server.shutdown();self.server.server_close();self.tmp.cleanup()
-    def start(self,kind,threshold=None):
+    def start(self,kind,threshold=None,**context):
         model='gpt-6.1-sol' if kind=='openai' else 'claude-opus-5-5'
         subprocess.run([str(protocol.BINARY),'--home',str(self.home),'init','--workspace',str(self.work),'--model',model],capture_output=True,check=True)
         p=self.home/'runtime.json';cfg=json.loads(p.read_text());cfg['provider'].update(kind=kind,model=model,endpoint=f'http://127.0.0.1:{self.server.server_port}/'+('responses' if kind=='openai' else 'messages'),api_key_env='RUNTIME_FIXTURE_KEY',reasoning_effort=None)
         cfg['limits']['max_context_bytes']=64000
         if threshold:cfg['context']['compact_threshold_tokens']=threshold
+        cfg['context'].update(context)
         p.write_text(json.dumps(cfg))
         self.c=protocol.Client(self.home);self.c.call('initialize',{'protocolVersion':1,'clientCapabilities':{}})
         self.sid=self.c.call('session/new',{'cwd':str(self.work),'mcpServers':[]})['result']['sessionId']
@@ -195,6 +226,114 @@ class Tests(unittest.TestCase):
         self.assertIn('waiting request',json.dumps(later['messages'][before]))
         self.assertNotIn('WAITING_SNAPSHOT',json.dumps(later['messages']))
         self.assertEqual(len([1 for p,b in self.server.requests if b.get('compaction')]),1)
+
+    def reasoning(self,body):return [b for m in body['messages'] for b in m['content'] if b['type']=='thinking']
+    def reopen(self,**changes):
+        self.c.close();p=self.home/'runtime.json';p.write_text(json.dumps({**json.loads(p.read_text()),**changes}))
+        self.c=protocol.Client(self.home);self.c.call('initialize',{'protocolVersion':1,'clientCapabilities':{}})
+        self.c.call('session/load',{'sessionId':self.sid,'cwd':str(self.work),'mcpServers':[]})
+    def saved_replies(self):
+        with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:
+            return [i for i in json.loads(db.execute('SELECT items FROM sessions WHERE id=?',(self.sid,)).fetchone()[0]) if i.get('type')=='provider_state']
+    def ends(self,text):self.assertEqual(self.prompt(text),{'jsonrpc':'2.0','id':self.c.next,'result':{'stopReason':'end_turn','_meta':unittest.mock.ANY}})
+
+    # From here the fixture answers as the service does where it enforces the
+    # rule: every reply opens with reasoning tied to the instructions, the
+    # tools and every earlier block, and a request that sends such a block
+    # back after anything else is refused.
+    def test_reasoning_is_left_out_once_the_instructions_change(self):
+        self.server.bound=True;self.start('anthropic')
+        self.ends('First request');self.ends('Second request');self.ends('Third request')
+        # Nothing changed: every earlier reply is sent back whole.
+        self.assertEqual(len(self.reasoning(self.model_requests()[-1])),2)
+        self.reopen(instructions='Changed instructions')
+        self.ends('Fourth request')
+        fourth=self.model_requests()[-1]
+        self.assertIn('Changed instructions',json.dumps(fourth['system']))
+        self.assertEqual(self.reasoning(fourth),[])
+        self.assertEqual([[b['type'] for b in m['content']] for m in fourth['messages']],[['text']]*7)
+        # The reply produced after the change still follows what is sent.
+        self.ends('Fifth request')
+        fifth=self.model_requests()[-1]
+        self.assertEqual([[b['type'] for b in m['content']] for m in fifth['messages']],[['text']]*7+[['thinking','text'],['text']])
+        self.assertEqual(self.without_marks(fifth['messages'])[:7],self.without_marks(fourth['messages']))
+        # Saved history keeps each reply as the provider returned it.
+        self.assertEqual([[b['type'] for b in i['message']['content']] for i in self.saved_replies()],[['thinking','text']]*5)
+        self.assertEqual({i['message']['content'][0]['signature'].split()[0] for i in self.saved_replies()},{'BOUND'})
+
+    def test_reasoning_produced_after_a_window_is_left_out_when_the_window_cannot_be_used(self):
+        # The first turn compacts between its two requests, so every later
+        # reply follows the provider's window.
+        self.server.bound=True;self.server.script=['clock'];self.server.reported_tokens=5000
+        self.start('anthropic',threshold=1024)
+        self.ends('First request');self.ends('Second request')
+        second=self.model_requests()[-1]
+        self.assertEqual([b['type'] for b in second['messages'][0]['content']],['compaction','thinking','text'])
+        # Changed instructions leave the checkpoint unusable. The saved
+        # transcript is sent in place of the window.
+        self.reopen(instructions='Changed instructions')
+        self.ends('Third request')
+        third=self.model_requests()[-1]
+        self.assertEqual([[b['type'] for b in m['content']] for m in third['messages']],[['text'],['tool_use'],['tool_result'],['text'],['text'],['text'],['text']])
+        self.assertEqual(len([1 for p,b in self.server.requests if b.get('compaction')]),1)
+        self.assertEqual([[b['type'] for b in i['message']['content']] for i in self.saved_replies()],[['thinking','tool_use']]+[['thinking','text']]*3)
+
+    def test_a_summary_request_leaves_out_reasoning_bound_to_other_instructions(self):
+        self.server.bound=True;self.start('anthropic')
+        self.ends('First request');self.ends('Second '+('x'*40000))
+        self.assertFalse(any(b.get('compaction') for p,b in self.server.requests))
+        # The next prompt needs maintenance before its first model request.
+        self.reopen(instructions='Changed instructions')
+        self.ends('Third '+('x'*10000))
+        summary=next(b for p,b in self.server.requests if b.get('compaction'))
+        self.assertEqual(self.reasoning(summary),[])
+        self.assertIn('Third',json.dumps(summary['messages'][-1]))
+        self.assertEqual([b['type'] for b in self.model_requests()[-1]['messages'][0]['content']],['compaction'])
+
+    def test_reasoning_is_left_out_after_turns_before_it_are_archived(self):
+        self.server.bound=True;self.start('anthropic',provider_compaction=False)
+        for n in ('First','Second','Third'):self.ends(n+' request '+('x'*20000))
+        third=self.model_requests()[-1]
+        # The first turn no longer fits: an archive note stands in for it, and
+        # the second reply followed the turn itself.
+        self.assertIn('Saved conversation archive',third['messages'][0]['content'][0]['text'])
+        self.assertIn('Second request',third['messages'][0]['content'][1]['text'])
+        self.assertEqual(self.reasoning(third),[])
+        self.assertEqual([[b['type'] for b in m['content']] for m in third['messages']],[['text','text'],['text'],['text']])
+        # Each new cut changes the note the kept turns follow.
+        self.ends('Fourth request '+('x'*20000))
+        fourth=self.model_requests()[-1]
+        self.assertIn('Third request',fourth['messages'][0]['content'][1]['text'])
+        self.assertEqual(self.reasoning(fourth),[])
+        with closing(sqlite3.connect(self.home/'history.sqlite3')) as db:
+            self.assertEqual([json.loads(r[0])['kind'] for r in db.execute('SELECT data FROM context_checkpoints')],['extractive']*2)
+        self.assertEqual([[b['type'] for b in i['message']['content']] for i in self.saved_replies()],[['thinking','text']]*4)
+
+    def test_waiting_input_before_a_checkpoint_refreshes_the_snapshot_it_is_sent_with(self):
+        self.server.bound=True;self.server.script=['clock','clock'];self.start('anthropic')
+        started=threading.Event();release=threading.Event();self.server.hold=(started,release)
+        pid=self.c.request('session/prompt',{'sessionId':self.sid,'prompt':[self.snapshot('FIRST_SNAPSHOT','first request')]})
+        self.assertTrue(started.wait(5))
+        waiting=self.c.call('_session/steering',{'sessionId':self.sid,'prompt':[self.snapshot('WAITING_SNAPSHOT','waiting request')],'_meta':{'steering':{'inputId':'waiting','idleBehavior':'promptRequired'}}})
+        self.assertEqual(waiting['result']['outcome'],'injected')
+        release.set();self.assertEqual(self.c.finish(pid)['result']['stopReason'],'end_turn')
+        first,with_waiting,later=self.model_requests()
+        self.assertEqual(first['messages'],[{'role':'user','content':[{'type':'text','text':'FIRST_SNAPSHOT'}]}])
+        # The input replaces the prompt's snapshot in the request that carries
+        # it. The first reply followed the whole prompt, so only its tool call
+        # is sent from here on.
+        sent=json.dumps(with_waiting['messages'])
+        self.assertNotIn('FIRST_SNAPSHOT',sent)
+        self.assertIn('first request',sent)
+        self.assertEqual([[b['type'] for b in m['content']] for m in with_waiting['messages']],[['text'],['tool_use'],['tool_result','text']])
+        self.assertEqual(self.without_marks(with_waiting['messages'])[-1]['content'][-1],{'type':'text','text':'WAITING_SNAPSHOT'})
+        # The second reply followed that request, and the next one sends the
+        # same messages before it: its reasoning stays while its call is open.
+        before=len(with_waiting['messages'])
+        self.assertEqual(self.without_marks(later['messages'])[:before],self.without_marks(with_waiting['messages']))
+        self.assertEqual([[b['type'] for b in m['content']] for m in later['messages'][before:]],[['thinking','tool_use'],['tool_result']])
+        self.assertFalse(any(b.get('compaction') for p,b in self.server.requests))
+        self.assertEqual([[b['type'] for b in i['message']['content']] for i in self.saved_replies()],[['thinking','tool_use']]*2+[['thinking','text']])
 
     def test_compaction_rejection_records_safe_reason_not_provider_payload(self):
         self.start('openai');self.server.compact_error=True
