@@ -70,6 +70,18 @@ impl Restored {
     }
 }
 
+/// A projected transcript with the input waiting to be sent after it. That
+/// input is saved once the request completes, and the next request projects
+/// it with the transcript. Projecting it here gives both the same prefix: a
+/// snapshot it refreshes is replaced from the request that carries it.
+fn with_pending(mut items: Vec<Value>, pending: &[Value]) -> Vec<Value> {
+    if !pending.is_empty() {
+        items.extend_from_slice(pending);
+        crate::context::project_snapshots(&mut items);
+    }
+    items
+}
+
 fn restored(original: &[Value], checkpoints: Vec<Value>, settings: &str) -> Result<Restored> {
     // Only server compaction items in the durable transcript can prune a
     // prefix. Standalone compact output is a canonical window, kept intact in
@@ -179,10 +191,23 @@ impl Provider {
             .iter()
             .map(|input| input.item.clone())
             .collect();
+        // Anthropic ties a reasoning block to the instructions, the tools and
+        // every earlier message. Each saved reply records what it followed;
+        // reasoning this view would send after anything else is left out.
+        // A request that cannot be built fails when it is sent, not here.
+        let follows = (self.config.provider.kind == ProviderKind::Anthropic)
+            .then(|| self.request_settings(instructions, tools).ok())
+            .flatten();
+        let bound = |items: &mut Vec<Value>| {
+            if let Some(settings) = &follows {
+                history::keep_bound_reasoning(settings, items);
+            }
+        };
         if !self.native_context() {
             let mut view =
                 crate::context::prepare(original, &self.config.context, budget, active_turn_start)?;
-            view.items.extend(pending);
+            view.items = with_pending(view.items, &pending);
+            bound(&mut view.items);
             return Ok(view);
         }
         let settings = digest(&json!({"instructions":instructions,"tools":tools}))?;
@@ -211,6 +236,8 @@ impl Provider {
         // uses. The stored native checkpoint and opaque provider records remain
         // unchanged; only correlated redundant MCP fallbacks can be omitted.
         items = crate::mcp::model_view(&items);
+        // Before maintenance too: a summary request carries the same blocks.
+        bound(&mut items);
         let bytes = crate::media::context_bytes(&items)?;
         // A canonical window can retain large user messages. Recompacting the
         // same window on every new prompt adds latency without reclaiming it.
@@ -278,11 +305,12 @@ impl Provider {
             "Provider model window exceeds byte limit; full history retained"
         );
         if !pending.is_empty() {
-            if source.native {
-                items = crate::mcp::model_view(&source.view(&pending));
+            items = if source.native {
+                crate::mcp::model_view(&source.view(&pending))
             } else {
-                items.extend(pending);
-            }
+                with_pending(items, &pending)
+            };
+            bound(&mut items);
         }
         Ok(View { items, checkpoint })
     }
@@ -549,6 +577,36 @@ mod tests {
         assert_eq!(view[1]["content"], replaced("second request"));
         assert_eq!(view[3], original[4]);
         assert_eq!(view.len(), 4);
+    }
+    #[test]
+    fn waiting_input_is_projected_with_the_transcript_it_is_saved_after() {
+        use crate::context::{SNAPSHOT_META, refreshed_view};
+        let prompt = |text: &str, retained: &str| json!({"role":"user","content":text,"_acp_prompt":[{"type":"text","text":text,"_meta":{SNAPSHOT_META:{"version":1,"key":"room","retainedText":retained}}}]});
+        let call = json!({"type":"tool_use","id":"a","name":"clock","input":{}});
+        let transcript = vec![
+            prompt("FIRST ROOM", "first request"),
+            json!({"type":"provider_state","provider":"anthropic","message":{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"s"}, call]}}),
+            json!({"type":"function_call","call_id":"a","name":"clock","arguments":"{}","_provider_shadow":true}),
+            json!({"type":"function_call_output","call_id":"a","output":"12:00"}),
+        ];
+        // Alone, the transcript's only snapshot is its newest.
+        let projected = refreshed_view(&transcript);
+        assert_eq!(projected, transcript);
+        assert_eq!(with_pending(projected.clone(), &[]), transcript);
+        let waiting = prompt("WAITING ROOM", "waiting request");
+        let view = with_pending(projected, std::slice::from_ref(&waiting));
+        assert_eq!(
+            view[0]["content"],
+            "Historical request/context (the refreshed projection is supplied later; original text remains in session_history):\nfirst request"
+        );
+        // The reply followed the whole prompt.
+        assert_eq!(view[1]["message"]["content"], json!([call]));
+        assert_eq!(view[2..4], transcript[2..]);
+        assert_eq!(view[4], waiting);
+        // Once the input is saved, the transcript projects to the same items.
+        let mut saved = transcript.clone();
+        saved.push(waiting);
+        assert_eq!(refreshed_view(&saved), view);
     }
     #[test]
     fn summary_request_never_ends_on_reasoning() {

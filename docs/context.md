@@ -58,7 +58,22 @@ Once a native checkpoint exists, its canonical window is retained intact.
 Items saved after it still have producer-declared snapshots refreshed, so a
 client that sends its context again with every prompt adds the retained text of
 the previous prompt to the window, not another whole copy. Input waiting at a
-request boundary counts as the newest version from the request that carries it.
+request boundary counts as the newest version from the request that carries it,
+before a checkpoint exists as well as after.
+
+Anthropic ties each reasoning block to the instructions, the tools and every
+earlier message, and where it enforces that, it refuses a request that sends a
+block back after anything else. Each saved Anthropic reply therefore carries
+`_follows_sha256`, a digest of what its request sent. In the working window a
+reply whose digest no longer matches keeps its text and tool calls and is sent
+without its reasoning, and so is every reply before it, because the provider
+accepts reasoning only as an unbroken run. This applies when the instructions or
+tools change, when a checkpoint cannot be used and the transcript is sent in
+place of its window, when an archive note replaces earlier turns, and to a
+summary request as much as a model request. A reply saved by an earlier version
+has no digest and is treated the same way. Saved history keeps every reply as
+the provider returned it.
+
 Compaction rejection events include the HTTP status and an allowlisted reason
 (for example `context_length_exceeded`), never the provider's raw error text.
 OpenAI Responses uses the standalone compact endpoint at a settled boundary,
