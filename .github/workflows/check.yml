@@ -126,6 +126,7 @@ jobs:
           python tests/mcp_tls.py
           python tests/provider_identity.py
           python tests/native_tools_reconciliation.py
+          python tests/images.py Tests.test_named_document_roundtrip_and_session_load
           python tests/windows_protocol.py
           python scripts/package-release.py --binary "${{ github.workspace }}/target/${{ matrix.target }}/release/${{ matrix.executable }}" --platform "${{ matrix.platform }}" --source "${{ github.sha }}" --output dist
       - uses: actions/upload-artifact@v4

@@ -68,6 +68,12 @@ The ACP client decides how attachments are displayed or delivered, such as a
 Slack file upload. The runtime does not choose another destination or fetch a
 remote URL when attaching.
 
+Use `workspace_attach_file` to send a saved Markdown, plain text, CSV or JSON
+document to the current conversation. It reads a regular file inside the
+session workspace and returns its filename and original UTF-8 contents as an ACP
+embedded resource. The limit is 200,000 bytes. Delivery is handled by the
+connected client. Loading the session again does not send the file again.
+
 Standard MCP image results are retained as attributed visual tool evidence and
 replayed in tool cards. Images are passed through the existing provider image
 codecs, without embedding base64 in truncated text. Tool observations never
