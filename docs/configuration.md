@@ -25,6 +25,10 @@ an incompatible installation change does not translate historical state. The
 host should invalidate any scheduler approval that covered the prior execution
 configuration. Supported [per-session model and reasoning choices](acp-optional-capabilities.md#session-model-and-reasoning-choices)
 are a separate explicit interface with their own history and active-turn checks.
+For a native provider-tool-only change that blocks a saved model choice, the
+OS owner can use the bounded [existing-session reconciliation](provider-identity.md#reconcile-a-provider-hosted-tool-change)
+without changing the installation back or replacing the session. Ordinary
+configuration writes do not perform that reconciliation automatically.
 
 Configuration contains credential references: environment variable names for API keys, and a private credentials-file path for an explicitly connected ChatGPT account. Keep actual secrets in the host's private secret store or the account flow. Workspace file tools cannot read the runtime home. Do not place credentials in instructions, profiles, model options, or the exposed workspace.
 

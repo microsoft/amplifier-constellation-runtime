@@ -99,6 +99,7 @@ jobs:
       - run: python tests/providers.py
       - run: python tests/provider_identity.py
       - run: python tests/model_selection.py
+      - run: python tests/native_tools_reconciliation.py
       - run: python tests/capabilities.py
       - run: python tests/computer.py
       - run: python tests/tool_permissions.py
@@ -124,6 +125,7 @@ jobs:
           python tests/copilot_protocol.py
           python tests/mcp_tls.py
           python tests/provider_identity.py
+          python tests/native_tools_reconciliation.py
           python tests/windows_protocol.py
           python scripts/package-release.py --binary "${{ github.workspace }}/target/${{ matrix.target }}/release/${{ matrix.executable }}" --platform "${{ matrix.platform }}" --source "${{ github.sha }}" --output dist
       - uses: actions/upload-artifact@v4

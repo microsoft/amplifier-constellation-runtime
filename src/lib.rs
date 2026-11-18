@@ -17,6 +17,7 @@ pub mod media;
 pub mod migrate;
 pub mod model_policy;
 pub mod model_selection;
+pub mod native_tools_reconciliation;
 pub mod observability;
 pub mod provider;
 pub mod rpc;
