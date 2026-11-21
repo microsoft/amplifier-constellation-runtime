@@ -13,9 +13,14 @@ use std::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use crate::config::{Provider, ProviderAuth, ProviderKind};
+use crate::model_policy::{self, CatalogStatus};
+
 const ISSUER: &str = "https://auth.openai.com";
 const TOKEN: &str = "https://auth.openai.com/api/accounts/oauth/token";
 const RESOURCE: &str = "https://api.openai.com/v1";
+const AUTHORIZATION_LIMIT: usize = 256 * 1024;
+const MODEL_CATALOG_LIMIT: usize = 8 * 1024 * 1024;
 const SCOPES: &str =
     "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct";
 
@@ -74,23 +79,24 @@ fn safe_auth_url(url: &str) -> Result<reqwest::Url> {
     Ok(u)
 }
 async fn response_json(response: reqwest::Response) -> Result<Value> {
+    bounded_json(response, AUTHORIZATION_LIMIT, "Authorization response").await
+}
+
+async fn bounded_json(response: reqwest::Response, limit: usize, label: &str) -> Result<Value> {
     use futures_util::StreamExt;
     ensure!(
         response.status().is_success(),
-        "ChatGPT authorization request failed (HTTP {}); reconnect this installation's account",
+        "ChatGPT {label} request failed (HTTP {}); check this installation's account",
         response.status().as_u16()
     );
     let mut stream = response.bytes_stream();
     let mut bytes = Vec::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.context("ChatGPT authorization response interrupted")?;
-        ensure!(
-            bytes.len() + chunk.len() <= 256 * 1024,
-            "Authorization response too large"
-        );
+        let chunk = chunk.with_context(|| format!("ChatGPT {label} interrupted"))?;
+        ensure!(bytes.len() + chunk.len() <= limit, "{label} too large");
         bytes.extend_from_slice(&chunk);
     }
-    serde_json::from_slice(&bytes).context("Invalid authorization response")
+    serde_json::from_slice(&bytes).with_context(|| format!("Invalid ChatGPT {label}"))
 }
 async fn discovery(client: &reqwest::Client) -> Result<Value> {
     response_json(
@@ -496,20 +502,37 @@ pub async fn sign_in(home: &Path, port: u16, no_browser: bool) -> Result<Value> 
 
 pub async fn models(home: &Path) -> Result<Value> {
     let token = access_token(&path(home)).await?;
-    let value = response_json(
+    let value = bounded_json(
         client()?
             .get(format!("{RESOURCE}/models"))
             .bearer_auth(token)
             .send()
             .await?,
+        MODEL_CATALOG_LIMIT,
+        "model catalog",
     )
     .await?;
     let list = value["models"]
         .as_array()
         .context("Account model catalog did not return models")?;
-    Ok(
-        json!({"models":list.iter().filter(|m| m["visibility"] == "list").map(|m|json!({"slug":m["slug"],"display_name":m["display_name"]})).collect::<Vec<_>>()}),
-    )
+    let models: Vec<_> = list
+        .iter()
+        .filter(|model| model["visibility"] == "list")
+        .filter_map(|model| {
+            let slug = model["slug"].as_str()?;
+            let mut provider = Provider::preset(ProviderKind::Openai, slug.into());
+            provider.auth = ProviderAuth::Chatgpt;
+            provider.allow_unverified_model =
+                model_policy::catalog_status(provider.kind, slug) == CatalogStatus::Unverified;
+            Some(json!({
+                "slug": slug,
+                "display_name": model["display_name"],
+                "requires_model_opt_in": model_policy::validate(&provider)
+                    .ok().map(|()| provider.allow_unverified_model),
+            }))
+        })
+        .collect();
+    Ok(json!({"models": models}))
 }
 
 pub async fn import(home: &Path, source: &Path) -> Result<Value> {
