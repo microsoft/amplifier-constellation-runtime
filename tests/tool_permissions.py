@@ -62,7 +62,8 @@ class Handler(ResponsesWebSocketMixin, BaseHTTPRequestHandler):
     def reply(self, body, result):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Mcp-Session-Id", "permission-fixture")
+        if body["method"] == "initialize" or not getattr(self.server, "conflicting_session_headers", False):
+            self.send_header("Mcp-Session-Id", "permission-fixture")
         self.end_headers()
         self.wfile.write(json.dumps({"jsonrpc": "2.0", "id": body["id"],
                                     "result": result}).encode())
@@ -75,6 +76,8 @@ class Handler(ResponsesWebSocketMixin, BaseHTTPRequestHandler):
                 self.server.mcp_traffic.append((method, self.headers.get("Mcp-Session-Id")))
             if method in ("notifications/initialized", "notifications/cancelled"):
                 self.send_response(202)
+                if method == "notifications/cancelled" and getattr(self.server, "conflicting_session_headers", False):
+                    self.send_header("Mcp-Session-Id", "from-cancellation")
                 self.end_headers()
                 return
             if method == "initialize":
@@ -94,8 +97,14 @@ class Handler(ResponsesWebSocketMixin, BaseHTTPRequestHandler):
                     self.server.recorded_values.append(body["params"]["arguments"]["value"])
                 if body["params"] == getattr(self.server, "lose_response_for", None):
                     self.server.interrupted_request_id = body["id"]
+                    if getattr(self.server, "conflicting_session_headers", False):
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Mcp-Session-Id", "from-incomplete-result")
+                        self.end_headers()
+                        self.wfile.write(b'{"jsonrpc":')
                     self.close_connection = True
-                    return  # The tool ran; the client receives no HTTP response.
+                    return  # The tool ran, but no valid terminal result reaches the client.
                 observation = (json.dumps(self.server.recorded_values) if hasattr(self.server, "recorded_values")
                                else "Fixture observation returned")
                 result = {"content": [{"type": "text", "text": observation}]}
@@ -418,6 +427,29 @@ class ToolPermissions(unittest.TestCase):
         self.assertEqual(len(self.server.effects), 3)
         self.assertEqual(self.server.effects[-1], {"name": "record", "arguments": write_args})
         self.assertEqual(self.server.recorded_values, ["new turn entry"])
+
+    def test_incomplete_result_and_cancellation_headers_preserve_initialized_mcp_session(self):
+        self.server.conflicting_session_headers = True
+        self.server.recorded_values = []
+        self.server.mcp_traffic = []
+        client = self.client(mcp_server="fixture")
+        args = {"value": "retained"}
+        self.server.lose_response_for = {"name": "record", "arguments": args}
+        first, result = self.prompt(client, [self.step("mcp_0_record", args),
+                                             self.step("mcp_0_observe", {})], approve=True)
+        self.assertEqual(result["result"]["stopReason"], "end_turn")
+        second, result = self.prompt(client, [self.step("mcp_0_observe", {"page": 2})], approve=True)
+        self.assertEqual(result["result"]["stopReason"], "end_turn")
+        sid = "permission-fixture"
+        self.assertEqual(self.server.mcp_traffic, [("initialize", None), ("notifications/initialized", sid),
+                         ("tools/list", sid), ("tools/call", sid), ("notifications/cancelled", sid),
+                         ("tools/call", sid), ("tools/call", sid)])
+        self.assertEqual(self.server.recorded_values, ["retained"])
+        terminals = [(u["toolCallId"], u["status"]) for frame in client.updates
+                     if (u := frame["params"]["update"]).get("sessionUpdate") == "tool_call_update"
+                     and u["status"] in ("failed", "completed")]
+        self.assertEqual(terminals, [(first + "-call-0", "failed"), (first + "-call-1", "completed"),
+                                     (second + "-call-0", "completed")])
 
     def test_registry_identity_overrides_provider_and_argument_identity_claims(self):
         client = self.client(mcp_server="other-service")

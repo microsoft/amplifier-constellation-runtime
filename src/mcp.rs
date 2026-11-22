@@ -571,7 +571,11 @@ impl Transport {
                     "MCP request failed (HTTP {})",
                     response.status().as_u16()
                 );
-                if let Some(s) = response.headers().get("Mcp-Session-Id") {
+                // Only the initialize response can establish the session. Its
+                // connection is discarded if the InitializeResult is invalid.
+                if msg["method"] == "initialize"
+                    && let Some(s) = response.headers().get("Mcp-Session-Id")
+                {
                     *session = Some(s.to_str()?.to_owned());
                 }
                 if id.is_none() {
