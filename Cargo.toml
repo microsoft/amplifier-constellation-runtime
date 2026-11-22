@@ -1,6 +1,6 @@
 [package]
 name = "agent-runtime"
-version = "0.15.15"
+version = "0.15.16"
 edition = "2024"
 rust-version = "1.88"
 publish = false
