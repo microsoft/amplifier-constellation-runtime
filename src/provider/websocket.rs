@@ -96,6 +96,21 @@ impl Client {
         let max = provider.config.limits.max_model_calls;
         let provider_context_limit = provider.config.limits.max_context_bytes;
         let idle = std::time::Duration::from_secs(provider.config.limits.provider_idle_seconds);
+        let codex_artwork = provider.config.provider.auth == crate::config::ProviderAuth::Codex
+            && provider
+                .config
+                .provider
+                .native
+                .tools
+                .iter()
+                .any(|t| t["type"] == "image_generation")
+            && provider
+                .config
+                .provider
+                .native
+                .tools
+                .iter()
+                .all(|t| t["type"] == "image_generation");
         let task = tokio::spawn(async move {
             let mut driver = Driver {
                 socket,
@@ -125,6 +140,10 @@ impl Client {
                 inline_inputs: vec![],
                 messages: super::identity::Messages::default(),
                 artwork: vec![],
+                codex_artwork,
+                artifact_handoff: false,
+                local_recovery: false,
+                received_output: false,
                 completed_items: Default::default(),
                 seen_created: HashMap::new(),
                 seen_completed: HashMap::new(),
@@ -187,6 +206,10 @@ struct Pending {
 }
 struct Driver {
     artwork: Vec<Value>,
+    codex_artwork: bool,
+    artifact_handoff: bool,
+    local_recovery: bool,
+    received_output: bool,
     completed_items: super::completed_items::CompletedItems,
     idle: std::time::Duration,
     failure_stage: &'static str,
@@ -269,6 +292,31 @@ impl Driver {
         }
         Ok(true)
     }
+    async fn rotate_socket(&mut self) -> Result<()> {
+        let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+            .max_message_size(Some(24 * 1024 * 1024))
+            .max_frame_size(Some(24 * 1024 * 1024));
+        let (socket, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            tokio_tungstenite::connect_async_tls_with_config(
+                self.connection_request.clone(),
+                Some(config),
+                false,
+                self.connector.clone(),
+            ),
+        )
+        .await
+        .context("Settled model connection rotation timed out")?
+        .map_err(|_| {
+            anyhow::anyhow!("Settled model connection rotation failed; no work was replayed")
+        })?;
+        let _ = self.socket.close(None).await;
+        self.socket = socket;
+        self.opened_at = tokio::time::Instant::now();
+        self.id = None;
+        Ok(())
+    }
+
     async fn steer(&mut self) -> Result<()> {
         if self.maintenance
             || self.pending.is_some()
@@ -394,40 +442,45 @@ impl Driver {
         // Responses WebSockets have a bounded lifetime. Rotate only between
         // settled responses, never while a steering successor may be running.
         // Send the canonical context, not a replay of a possibly accepted call.
-        if self.opened_at.elapsed() >= std::time::Duration::from_secs(55 * 60)
+        // A full-context request carries retained image bytes as evidence. Start
+        // this chain before another image operation can be requested, at most
+        // once in this logical turn. Tool results and call budgets stay intact.
+        let has_image = |item: &Value| {
+            item["content"].as_array().is_some_and(|parts| {
+                parts.iter().any(|p| {
+                    p["type"] == "input_image"
+                        && p["image_url"]
+                            .as_str()
+                            .is_some_and(|url| url.starts_with("data:image/"))
+                })
+            })
+        };
+        let handoff = self.codex_artwork
+            && !self.artifact_handoff
+            && !self.local_recovery
+            && self.id.is_some()
+            && all.iter().any(has_image)
+            && (!self.artwork.is_empty()
+                || request.continuation_items.iter().any(|v| {
+                    v["_tool_images"]
+                        .as_array()
+                        .is_some_and(|images| !images.is_empty())
+                }));
+        if (handoff || self.opened_at.elapsed() >= std::time::Duration::from_secs(55 * 60))
             && !self.running
             && !self.awaiting_created
             && !self.auto_wait
             && self.pending.is_none()
         {
-            let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
-                .max_message_size(Some(24 * 1024 * 1024))
-                .max_frame_size(Some(24 * 1024 * 1024));
-            let (socket, _) = tokio::time::timeout(
-                std::time::Duration::from_secs(15),
-                tokio_tungstenite::connect_async_tls_with_config(
-                    self.connection_request.clone(),
-                    Some(config),
-                    false,
-                    self.connector.clone(),
-                ),
-            )
-            .await
-            .context("Settled model connection rotation timed out")?
-            .map_err(|_| {
-                anyhow::anyhow!("Settled model connection rotation failed; no work was replayed")
-            })?;
-            let _ = self.socket.close(None).await;
-            self.socket = socket;
-            self.opened_at = tokio::time::Instant::now();
-            self.id = None;
+            self.rotate_socket().await?;
+            self.artifact_handoff |= handoff;
             body.as_object_mut().unwrap().remove("previous_response_id");
             body["input"] = json!(all);
             self.inbox.store.event(
                 &self.inbox.sid,
                 Some(&self.inbox.turn),
                 "provider.connection.rotated",
-                json!({"reason":"settled_lifetime_boundary"}),
+                json!({"reason":if handoff {"retained_artwork"} else {"settled_lifetime_boundary"}}),
             )?;
         }
         let observations = std::mem::take(&mut self.artwork);
@@ -437,11 +490,24 @@ impl Driver {
                 .context("Response continuation missing input")?
                 .extend(observations);
         }
+        if self.local_recovery {
+            body["tools"]
+                .as_array_mut()
+                .context("Missing tools")?
+                .retain(|t| t["type"] != "image_generation");
+            let instructions = body["instructions"]
+                .as_str()
+                .context("Missing instructions")?;
+            body["instructions"] = json!(format!(
+                "{instructions}\nThe provider failed during the artwork request. Its outcome is unknown. Use the retained image or read the saved project original. Do not repeat generation or editing through another image service. Continue with available local tools where they fulfill the request. Distinguish saved results from unconfirmed edits."
+            ));
+        }
         self.history = all;
         self.window_start = 0;
         body.as_object_mut().unwrap().remove("stream");
         body.as_object_mut().unwrap().remove("background");
         body["type"] = json!("response.create");
+        self.received_output = false;
         self.running = true;
         self.awaiting_created = true;
         self.needs_tools = false;
@@ -475,7 +541,47 @@ impl Driver {
                     "pending_inputs":self.pending.as_ref().map_or(0,|p|p.inputs.len()),
                     "steering_accepted":self.pending.as_ref().is_some_and(|p|p.remote_id.is_some())}))?;
         }
-        match event["type"].as_str().unwrap_or("") {
+        let event_type = event["type"].as_str().unwrap_or("");
+        if matches!(event_type, "response.failed" | "error")
+            && event["error"]["code"]
+                .as_str()
+                .or(event["response"]["error"]["code"].as_str())
+                == Some("server_error")
+            && self.artifact_handoff
+            && !self.local_recovery
+            && !self.received_output
+            && self.running
+            && !self.awaiting_created
+            && self.pending.is_none()
+            && self.inputs.is_empty()
+            && self.inline_inputs.is_empty()
+            && !self.auto_wait
+            && self.waiter.is_some()
+            && self.created < self.max
+            && event["response"]["id"]
+                .as_str()
+                .or(event["response_id"].as_str())
+                .is_none_or(|id| Some(id) == self.id.as_deref())
+        {
+            self.rotate_socket().await?;
+            self.running = false;
+            self.needs_tools = false;
+            self.local_recovery = true;
+            self.inbox.store.event(
+                &self.inbox.sid,
+                Some(&self.inbox.turn),
+                "provider.artwork.recovery",
+                json!({"reason":"server_error","hosted_image_tool_disabled":true}),
+            )?;
+            if let Some(reply) = self.waiter.take() {
+                let _ = reply.send(Err(super::ResumeArtworkLocally.into()));
+            }
+            return Ok(());
+        }
+        if event_type.starts_with("response.output_") || event_type == "response.refusal.delta" {
+            self.received_output = true;
+        }
+        match event_type {
             "response.created" => {
                 let id = event["response"]["id"]
                     .as_str()
@@ -743,3 +849,6 @@ impl Driver {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

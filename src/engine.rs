@@ -409,7 +409,7 @@ impl Turn<'_> {
             )?;
             let model_started = std::time::Instant::now();
             provider.continuation_items = self.session.items[continuation_start..].to_vec();
-            let response = provider
+            let response = match provider
                 .complete(
                     &instructions,
                     &view.items,
@@ -418,7 +418,12 @@ impl Turn<'_> {
                     &self.cancel,
                     self.inbox.clone(),
                 )
-                .await?;
+                .await
+            {
+                Ok(response) => response,
+                Err(error) if error.is::<crate::provider::ResumeArtworkLocally>() => continue,
+                Err(error) => return Err(error),
+            };
             self.store.event(
                 &self.session.id,
                 Some(turn),

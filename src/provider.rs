@@ -17,6 +17,15 @@ use serde_json::{Value, json};
 use stream::{Collector, Frames};
 use tokio_util::sync::CancellationToken;
 
+#[derive(Debug)]
+pub(crate) struct ResumeArtworkLocally;
+impl std::fmt::Display for ResumeArtworkLocally {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Continue from retained artwork using local tools")
+    }
+}
+impl std::error::Error for ResumeArtworkLocally {}
+
 pub struct Provider {
     client: reqwest::Client,
     config: Config,
