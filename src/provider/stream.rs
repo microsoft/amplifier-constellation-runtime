@@ -65,6 +65,7 @@ pub struct Collector {
     stop: Option<String>,
     terminal: bool,
     response: Option<Value>,
+    completed_items: super::completed_items::CompletedItems,
     container: Value,
     grounding: Value,
 }
@@ -83,6 +84,7 @@ impl Collector {
             stop: None,
             terminal: false,
             response: None,
+            completed_items: Default::default(),
             container: Value::Null,
             grounding: json!({}),
         }
@@ -104,8 +106,11 @@ impl Collector {
                             text.push(s.into());
                         }
                     }
+                    "response.output_item.done" => self.completed_items.observe(&event)?,
                     "response.completed" | "response.incomplete" => {
-                        self.response = Some(event["response"].clone());
+                        let mut response = event["response"].clone();
+                        self.completed_items.finish(&mut response)?;
+                        self.response = Some(response);
                         self.terminal = true;
                     }
                     "response.failed" | "error" => {

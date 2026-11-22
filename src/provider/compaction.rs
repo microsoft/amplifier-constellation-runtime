@@ -164,7 +164,10 @@ impl Provider {
                 self.config.provider.kind,
                 ProviderKind::Openai | ProviderKind::Anthropic
             )
-            && self.config.provider.auth != ProviderAuth::Chatgpt
+            && !matches!(
+                self.config.provider.auth,
+                ProviderAuth::Chatgpt | ProviderAuth::Codex
+            )
     }
 
     pub(crate) async fn prepare_context(

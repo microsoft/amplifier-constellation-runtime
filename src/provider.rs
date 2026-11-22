@@ -1,4 +1,5 @@
 mod compaction;
+mod completed_items;
 mod history;
 mod identity;
 mod rejection;
@@ -15,6 +16,15 @@ pub(crate) use history::FOLLOWS;
 use serde_json::{Value, json};
 use stream::{Collector, Frames};
 use tokio_util::sync::CancellationToken;
+
+#[derive(Debug)]
+pub(crate) struct ResumeArtworkLocally;
+impl std::fmt::Display for ResumeArtworkLocally {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Continue from retained artwork using local tools")
+    }
+}
+impl std::error::Error for ResumeArtworkLocally {}
 
 pub struct Provider {
     client: reqwest::Client,
@@ -33,8 +43,10 @@ impl Provider {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let p = &config.provider;
         let key = if p.kind == ProviderKind::Mock
-            || matches!(p.auth, ProviderAuth::None | ProviderAuth::Chatgpt)
-        {
+            || matches!(
+                p.auth,
+                ProviderAuth::None | ProviderAuth::Chatgpt | ProviderAuth::Codex
+            ) {
             None
         } else {
             std::env::var(&p.api_key_env)
@@ -42,8 +54,10 @@ impl Provider {
                 .map(|v| v.trim().to_owned())
                 .filter(|s| !s.is_empty())
         };
-        let required = !matches!(p.auth, ProviderAuth::None | ProviderAuth::Chatgpt)
-            && p.kind != ProviderKind::Mock
+        let required = !matches!(
+            p.auth,
+            ProviderAuth::None | ProviderAuth::Chatgpt | ProviderAuth::Codex
+        ) && p.kind != ProviderKind::Mock
             && (p.auth != ProviderAuth::Auto
                 || matches!(
                     p.kind,
@@ -90,6 +104,31 @@ impl Provider {
         mut request: reqwest::RequestBuilder,
     ) -> Result<reqwest::RequestBuilder> {
         let p = &self.config.provider;
+        if p.auth == ProviderAuth::Codex {
+            let path = p
+                .codex_credentials_file
+                .as_ref()
+                .context("Codex credential file is required")?;
+            let record: Value = serde_json::from_slice(&std::fs::read(path)?)
+                .context("Invalid Codex credential file")?;
+            let tokens = record.get("tokens").unwrap_or(&record);
+            let field = |key: &str| {
+                tokens[key]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .context("Codex subscription sign-in is incomplete")
+            };
+            let account = field("account_id")?;
+            ensure!(
+                Some(account) == p.codex_account_id.as_deref(),
+                "Codex credentials belong to a different account than this session"
+            );
+            return Ok(request
+                .bearer_auth(field("access_token")?)
+                .header("ChatGPT-Account-Id", account)
+                .header("OpenAI-Beta", "responses_websockets=2026-02-06")
+                .header("OpenAI-Originator", "codex"));
+        }
         if p.auth == ProviderAuth::Chatgpt {
             let token = crate::chatgpt::access_token(
                 p.chatgpt_credentials_file
@@ -158,7 +197,7 @@ impl Provider {
                     "Cannot send another provider's state to Responses"
                 );
                 let mut b = json!({"model":p.model,"instructions":instructions,"input":history::responses(items),"tools":tools,"max_output_tokens":max,"store":false,"stream":true});
-                if p.auth == ProviderAuth::Chatgpt {
+                if matches!(p.auth, ProviderAuth::Chatgpt | ProviderAuth::Codex) {
                     b.as_object_mut().unwrap().remove("max_output_tokens");
                 }
                 if p.kind != ProviderKind::Vllm {
@@ -242,7 +281,9 @@ impl Provider {
             body.as_object_mut().unwrap().remove("tools");
         }
         if !p.native.tools.is_empty() {
-            if matches!(p.kind, ProviderKind::Openai | ProviderKind::AzureOpenai) {
+            if matches!(p.kind, ProviderKind::Openai | ProviderKind::AzureOpenai)
+                && p.auth != ProviderAuth::Codex
+            {
                 body["max_tool_calls"] = json!(self.config.limits.max_tool_calls);
             }
             if !body["tools"].is_array() {
@@ -638,6 +679,62 @@ mod tests {
         config.provider.token_limit_parameter = parameter;
         let provider = Provider::new(&config).unwrap();
         provider.request("", &[], &[]).unwrap().1
+    }
+
+    #[tokio::test]
+    async fn codex_refresh_preserves_selected_account_and_refuses_file_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("credential");
+        let mut config = Config::initial(directory.path().into(), "fixture".into(), "model".into());
+        config.provider.auth = ProviderAuth::Codex;
+        config.provider.codex_credentials_file = Some(path.clone());
+        config.provider.codex_account_id = Some("A".into());
+        let store = crate::store::Store::open(directory.path().join("engine")).unwrap();
+        let session = store
+            .create(directory.path().into(), crate::config::Mode::ReadOnly)
+            .unwrap();
+        store
+            .bind_configured_provider(&session.id, &config.provider)
+            .unwrap();
+        let provider = Provider::new(&config).unwrap();
+        let write_snapshot = |account, token| {
+            std::fs::write(
+                &path,
+                serde_json::to_vec(&json!({"tokens":{"account_id":account,"access_token":token}}))
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        for token in ["old", "refreshed"] {
+            write_snapshot("A", token);
+            let request = provider
+                .headers(provider.client.get(&config.provider.endpoint))
+                .await
+                .unwrap()
+                .build()
+                .unwrap();
+            assert_eq!(request.headers()["ChatGPT-Account-Id"], "A");
+            assert_eq!(
+                request.headers()["Authorization"].to_str().unwrap(),
+                format!("Bearer {token}")
+            );
+            store
+                .bind_configured_provider(&session.id, &config.provider)
+                .unwrap();
+        }
+        write_snapshot("B", "new");
+        assert!(
+            provider
+                .headers(provider.client.get(&config.provider.endpoint))
+                .await
+                .is_err()
+        );
+        config.provider.codex_account_id = Some("B".into());
+        assert!(
+            store
+                .bind_configured_provider(&session.id, &config.provider)
+                .is_err()
+        );
     }
 
     #[test]

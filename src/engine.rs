@@ -292,6 +292,7 @@ impl Turn<'_> {
             self.config.name,
             self.session.mode.id(),
         );
+        let mut inspected_image_only = false;
         let mut tool_count = 0;
         // A recorded failed tool status may hide a transport or execution error.
         // Do not turn that uncertainty into a resumable local-capacity result.
@@ -408,7 +409,7 @@ impl Turn<'_> {
             )?;
             let model_started = std::time::Instant::now();
             provider.continuation_items = self.session.items[continuation_start..].to_vec();
-            let response = provider
+            let response = match provider
                 .complete(
                     &instructions,
                     &view.items,
@@ -417,7 +418,15 @@ impl Turn<'_> {
                     &self.cancel,
                     self.inbox.clone(),
                 )
-                .await?;
+                .await
+            {
+                Ok(response) => response,
+                Err(error) if error.is::<crate::provider::ResumeArtworkLocally>() => {
+                    tool_results_known = false;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             self.store.event(
                 &self.session.id,
                 Some(turn),
@@ -529,6 +538,16 @@ impl Turn<'_> {
                         )?;
                         self.peer.update(&self.session.id,json!({"sessionUpdate":"tool_call_update","toolCallId":call_id,"status":status,"rawOutput":detail})).await?;
                     }
+                }
+                if self.config.provider.auth == crate::config::ProviderAuth::Codex
+                    && !inspected_image_only
+                    && output
+                        .iter()
+                        .any(|i| i["type"] == "image_generation_call" && i["result"].is_string())
+                    && !output.iter().any(|i| i["type"] == "message")
+                {
+                    inspected_image_only = true;
+                    continue;
                 }
                 if response["_continue"] == true || !self.inbox.try_close()? {
                     continue;

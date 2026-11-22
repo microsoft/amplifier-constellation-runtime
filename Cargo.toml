@@ -1,6 +1,6 @@
 [package]
 name = "agent-runtime"
-version = "0.15.16"
+version = "0.15.17"
 edition = "2024"
 rust-version = "1.88"
 publish = false
@@ -32,6 +32,7 @@ webpki-roots = "1"
 tokio-util = { version = "0.7", features = ["rt"] }
 uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
 tempfile = "3"
 
 [features]

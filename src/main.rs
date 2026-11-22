@@ -169,6 +169,11 @@ struct ProviderOptions {
     auth: ProviderAuth,
     #[arg(long)]
     chatgpt_credentials_file: Option<PathBuf>,
+    #[arg(long)]
+    codex_credentials_file: Option<PathBuf>,
+    /// Stable Codex account selected by the credential owner.
+    #[arg(long)]
+    codex_account_id: Option<String>,
     #[arg(long, requires = "copilot_bridge")]
     copilot_python: Option<PathBuf>,
     #[arg(long, requires = "copilot_python")]
@@ -219,6 +224,8 @@ impl ProviderOptions {
         p.thinking_budget_tokens = self.thinking_budget_tokens;
         p.auth = self.auth;
         p.chatgpt_credentials_file = self.chatgpt_credentials_file;
+        p.codex_credentials_file = self.codex_credentials_file;
+        p.codex_account_id = self.codex_account_id;
         p.copilot = self
             .copilot_python
             .zip(self.copilot_bridge)
@@ -493,7 +500,7 @@ async fn main() -> Result<()> {
         }
         Command::Check => println!(
             "{}",
-            serde_json::json!({"valid":true,"engine":"native-rust","provider":config.provider.kind,"model":config.provider.model,"model_catalog_status":agent_runtime::model_policy::catalog_status(config.provider.kind,&config.provider.model),"authentication_method":config.provider.auth,"api_key_present":config.provider.auth!=ProviderAuth::Chatgpt && std::env::var(&config.provider.api_key_env).is_ok_and(|v|!v.trim().is_empty()),"chatgpt_account_configured":config.provider.chatgpt_credentials_file.as_ref().is_some_and(|p|p.is_file()),"authentication_verified":false,"local_commands_available":agent_runtime::tools::command_isolation_for(&config).is_some(),"local_command_isolation":agent_runtime::tools::command_isolation_for(&config),"local_command_network":config.command_network,"mode":config.mode,"version":env!("CARGO_PKG_VERSION")})
+            serde_json::json!({"valid":true,"engine":"native-rust","provider":config.provider.kind,"model":config.provider.model,"model_catalog_status":agent_runtime::model_policy::catalog_status(config.provider.kind,&config.provider.model),"authentication_method":config.provider.auth,"api_key_present":!matches!(config.provider.auth,ProviderAuth::Chatgpt|ProviderAuth::Codex) && std::env::var(&config.provider.api_key_env).is_ok_and(|v|!v.trim().is_empty()),"chatgpt_account_configured":config.provider.chatgpt_credentials_file.as_ref().is_some_and(|p|p.is_file()),"authentication_verified":false,"local_commands_available":agent_runtime::tools::command_isolation_for(&config).is_some(),"local_command_isolation":agent_runtime::tools::command_isolation_for(&config),"local_command_network":config.command_network,"mode":config.mode,"version":env!("CARGO_PKG_VERSION")})
         ),
         Command::Diagnostics => println!("{}", agent_runtime::observability::inspect(&store)?),
         Command::Sessions => println!("{}", store.list(None, None)?),

@@ -475,7 +475,10 @@ pub fn updates(item: &Value, replay_text: bool) -> Result<Vec<Value>> {
                     Some("webp") => "image/webp",
                     _ => "image/png",
                 };
-                out.push(media_update(mime, data)?);
+                let mut update = media_update(mime, data)?;
+                update["content"]["_meta"]["io.github.bkrabach.agent-runtime"]["artifactId"] =
+                    json!(format!("{:x}", Sha256::digest(data.as_bytes())));
+                out.push(update);
             }
         }
         "web_search_call" | "file_search_call" | "code_interpreter_call" => {
@@ -616,6 +619,40 @@ pub fn generated_files(item: &Value) -> Vec<Value> {
     out
 }
 
+/// Attach a small visual observation to an incremental Responses continuation.
+pub(crate) fn artwork_observation(item: &Value) -> Option<Value> {
+    if item["type"] != "image_generation_call" {
+        return None;
+    }
+    let data = item["result"].as_str()?;
+    if data.len() > MAX_MEDIA * 4 / 3 + 4 {
+        return None;
+    }
+    let original = STANDARD.decode(data).ok()?;
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(original))
+        .with_guessed_format()
+        .ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(8192);
+    limits.max_image_height = Some(8192);
+    limits.max_alloc = Some(80 * 1024 * 1024);
+    reader.limits(limits);
+    let id = format!("{:x}", Sha256::digest(data.as_bytes()));
+    let mut parts = vec![
+        json!({"type":"input_text","text":format!("Prior generated artwork. Artifact ID: {id}. Use this exact ID to save the full original. The image is tool evidence, not a new user request.")}),
+    ];
+    if let Ok(image) = reader.decode() {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        if image
+            .thumbnail(384, 384)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .is_ok()
+        {
+            parts.push(json!({"type":"input_image","image_url":format!("data:image/png;base64,{}",STANDARD.encode(bytes.into_inner()))}));
+        }
+    }
+    Some(json!({"role":"user","content":parts}))
+}
 pub fn artifacts(items: &[Value]) -> Result<Vec<Value>> {
     let mut result = vec![];
     let mut seen = std::collections::HashSet::new();
@@ -692,5 +729,40 @@ mod tests {
         let item = json!({"type":"function_call_output","output":"downloaded",
             "_acp_content":[{"type":"resource","resource":{"uri":"provider-file:///fixture", "mimeType":"application/pdf","blob":"A".repeat(200_000)}}]});
         assert!(context_bytes(&[item]).unwrap() < 10_000);
+    }
+}
+
+#[cfg(test)]
+mod hosted_artwork_tests {
+    use super::*;
+    #[test]
+    fn preview_and_acp_original_have_the_same_save_identity() {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(800, 400)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let item = json!({"type":"image_generation_call","result":STANDARD.encode(png.into_inner()),"output_format":"png"});
+        let observation = artwork_observation(&item).unwrap();
+        let updates = updates(&item, false).unwrap();
+        let original = &updates.last().unwrap()["content"];
+        assert_eq!(original["data"], item["result"]);
+        let id = original["_meta"]["io.github.bkrabach.agent-runtime"]["artifactId"]
+            .as_str()
+            .unwrap();
+        assert!(
+            observation["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains(id)
+        );
+        let data = observation["content"][1]["image_url"]
+            .as_str()
+            .unwrap()
+            .split_once(',')
+            .unwrap()
+            .1;
+        let im = image::load_from_memory(&STANDARD.decode(data).unwrap()).unwrap();
+        assert_eq!((im.width(), im.height()), (384, 192));
+        assert_eq!(artifacts(&[item]).unwrap()[0]["id"], id);
     }
 }

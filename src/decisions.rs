@@ -88,7 +88,7 @@ pub fn validate_backends(backends: &[Backend]) -> Result<()> {
     let mut names = HashSet::new();
     for b in backends {
         ensure!(
-            b.auth != ProviderAuth::Chatgpt,
+            !matches!(b.auth, ProviderAuth::Chatgpt | ProviderAuth::Codex),
             "ChatGPT plan usage currently applies to Responses, not decision services"
         );
         ensure!(

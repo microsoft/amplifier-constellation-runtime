@@ -33,3 +33,40 @@ The runtime verifies signature, issuer, audience, expiry, nonce, state, and PKCE
 Validation covers callback rejection, local PKCE flow, JWT signature and claim verification, and configuration boundaries. **An actual user sign-in, plan entitlement, refresh, and inference remain to be exercised with new user consent.** These are not established by protocol tests or by the presence of an API key.
 
 Official references: [overview](https://developers.openai.com/cookbook/articles/sign-in-with-chatgpt), [registration and sign-in](https://developers.openai.com/siwc/token-sharing-open-source/sign-in), [models and inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference), and [self-hosted VMs](https://developers.openai.com/siwc/token-sharing-open-source/self-hosted-vms).
+
+## Host-managed Codex subscription
+
+An installation that already manages a Codex subscription login can select it
+explicitly with `--provider openai --auth codex --codex-account-id ACCOUNT_ID --codex-credentials-file PATH
+--endpoint https://chatgpt.com/backend-api/codex/responses --model MODEL`.
+The credential owner handles login and refresh. Runtime reads the selected
+file when preparing a new authenticated request, checks its account ID against the selected account, and takes both the bearer token and account header from that same snapshot. WebSocket rotations within a logical turn reuse its already authenticated connection request. It accepts the Codex tokens object containing
+`account_id` and `access_token`, either at the top level or under `tokens`.
+Keep this private file outside every granted workspace. Public ChatGPT sign-in
+and Codex have separate registrations, endpoints and credential formats.
+
+Enable hosted artwork with `provider.native.image_input: true` and
+`provider.native.tools: [{"type":"image_generation","output_format":"png"}]`.
+The engine submits the tool on the ordinary model request. The client receives
+the original as ACP media with a Runtime artifact ID. An incremental model
+continuation receives that ID and an inspection preview. Full history retains
+the original for replay and `workspace_save_artifact`. A completed image-only
+Codex response allows one inspection step within the existing turn budget.
+Tool availability depends on the selected model and subscription.
+
+Runtime carries the model-call and local tool-call counters across connection
+rotation. The Codex subscription request sends no provider-side hosted-call
+or output-token cap. These counters bound different operations.
+
+The selected account ID participates in the session fingerprint. A token
+refresh for that account preserves continuity. Selecting a different account
+requires a new session. Development-only Codex sessions created before this
+binding have a path-only fingerprint and must start a new session; their
+history is retained. Other provider fingerprints are unchanged.
+
+Artwork recovery requires an acknowledged server failure explicitly tied to
+the active response, before any output. Partial images, populated terminal
+output, ambiguous failures and unsettled steering stop the turn. If recovery
+is admitted, the hosted image tool is removed for the rest of the turn. The
+failed operation remains uncertain even after a successful local tool call;
+a context limit then fails closed instead of offering a settled continuation.

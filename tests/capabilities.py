@@ -1,5 +1,5 @@
 """Typed decision and native media/tool contracts through real ACP processes."""
-import base64,json,os,subprocess,tempfile,threading,time,unittest
+import base64,hashlib,json,os,subprocess,tempfile,threading,time,unittest
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 import protocol
@@ -44,6 +44,16 @@ class Handler(ResponsesWebSocketMixin, BaseHTTPRequestHandler):
    elif kind=='ollama':
     self.send_response(200);self.send_header('Content-Type','application/x-ndjson');self.end_headers();self.wfile.write((json.dumps({'message':{'role':'assistant','content':'{"seen":true}'},'done':True,'done_reason':'stop'})+'\n').encode());return
    else:events=[{'choices':[{'delta':{'content':'{"seen":true}'},'finish_reason':'stop'}]}]
+  elif case.get('stream_only_artwork'):
+   if n == 1:
+    items = [
+     {'id':'art','type':'image_generation_call','result':case['png'],'output_format':'png'},
+     {'id':'read','type':'function_call','name':'workspace_list','arguments':'{"path":"."}','call_id':'read-1'},
+    ]
+    events = [{'type':'response.output_item.done','output_index':i,'item':item} for i,item in enumerate(items)]
+    events.append({'type':'response.completed','response':{'status':'completed','output':[]}})
+   else:
+    events=[{'type':'response.completed','response':{'status':'completed','output':[{'type':'message','role':'assistant','content':[{'type':'output_text','text':'Inspected.'}]}]}}]
   elif case.get('file_auto'):
    events=[{'type':'response.completed','response':{'status':'completed','output':[{'type':'message','role':'assistant','content':[{'type':'output_text','text':'Generated file','annotations':[{'type':'container_file_citation','file_id':'file-1','container_id':'container-1','filename':'image.png'}]}]}]}}]
   elif case.get('file_tool'):
@@ -117,6 +127,22 @@ class Tests(unittest.TestCase):
     self.server.case.update(chat=kind,requests=[]);self.cfg['provider'].update(kind=kind,native={'image_input':True,'tools':[{'type':'image_generation'},{'type':'web_search'}]});c=self.client();s=self.new(c);self.assertIn('result',self.prompt(c,s));self.assertTrue(any(u['params']['update'].get('content',{}).get('data')==PNG for u in c.updates));self.assertIn('https://example.com/source',json.dumps(c.updates))
     c.close();self.clients.remove(c);c=self.client();self.assertIn('result',c.call('session/load',{'sessionId':s,'cwd':str(self.work),'mcpServers':[]}));self.assertTrue(any(u['params']['update'].get('content',{}).get('data')==PNG for u in c.updates))
     self.assertIn('result',self.prompt(c,s,'Save',approve=True));self.assertEqual((self.work/'image.png').read_bytes(),base64.b64decode(PNG));self.assertEqual(len(c.callbacks),1)
+ def test_streamed_artwork_and_tool_survive_empty_terminal_snapshot(self):
+  # Valid 1x1 RGBA PNG. The following model step must see the local tool result
+  # and an attributed image with the same artifact identity delivered via ACP.
+  png='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNYtfvMfwAHdQMxTAUe1QAAAABJRU5ErkJggg=='
+  self.server.case.update(chat='openai',stream_only_artwork=True,png=png,requests=[])
+  self.cfg['provider'].update(kind='openai',native={'image_input':True,'tools':[{'type':'image_generation'}]})
+  client=self.client(); session=self.new(client)
+  self.assertIn('result',self.prompt(client,session))
+  identity=hashlib.sha256(png.encode()).hexdigest()
+  media=[u['params']['update'].get('content',{}) for u in client.updates]
+  self.assertTrue(any(isinstance(c,dict) and c.get('data')==png and c['_meta']['io.github.bkrabach.agent-runtime']['artifactId']==identity for c in media))
+  requests=self.server.case['requests']
+  self.assertEqual(len(requests),2)
+  content=requests[1][2]['input']
+  self.assertTrue(any(i.get('call_id')=='read-1' and i['type']=='function_call_output' for i in content))
+  self.assertTrue(any(isinstance(i.get('content'),list) and any(p.get('type')=='input_image' for p in i['content']) and identity in json.dumps(i) for i in content))
  def test_anthropic_hosted_tools_pause_continue_and_citations(self):
   self.server.case['chat']='anthropic';self.cfg['provider'].update(kind='anthropic',native={'tools':[{'type':'web_search_20250305','name':'web_search','max_uses':1}]});c=self.client();s=self.new(c);self.assertIn('result',self.prompt(c,s,'search'));self.assertEqual(len(self.server.case['requests']),2)
   b=self.server.case['requests'][1][2];self.assertEqual(b['container'],'container-fixture');self.assertEqual(b['messages'][1]['content'][0]['signature'],'signed');self.assertNotIn('PRIVATE THOUGHT',json.dumps(c.updates));self.assertNotIn('PRIVATE DATA',json.dumps(c.updates));self.assertIn('https://example.com',json.dumps(c.updates))
