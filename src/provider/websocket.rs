@@ -124,6 +124,8 @@ impl Client {
                 fixed_bytes: 0,
                 inline_inputs: vec![],
                 messages: super::identity::Messages::default(),
+                artwork: vec![],
+                completed_items: Default::default(),
                 seen_created: HashMap::new(),
                 seen_completed: HashMap::new(),
                 seen_accepted: HashMap::new(),
@@ -184,6 +186,8 @@ struct Pending {
     remote_id: Option<String>,
 }
 struct Driver {
+    artwork: Vec<Value>,
+    completed_items: super::completed_items::CompletedItems,
     idle: std::time::Duration,
     failure_stage: &'static str,
     failure_category: &'static str,
@@ -426,6 +430,13 @@ impl Driver {
                 json!({"reason":"settled_lifetime_boundary"}),
             )?;
         }
+        let observations = std::mem::take(&mut self.artwork);
+        if body.get("previous_response_id").is_some() {
+            body["input"]
+                .as_array_mut()
+                .context("Response continuation missing input")?
+                .extend(observations);
+        }
         self.history = all;
         self.window_start = 0;
         body.as_object_mut().unwrap().remove("stream");
@@ -601,6 +612,16 @@ impl Driver {
                         .compaction(&self.inbox.sid, &format!("server-{id}"), "in_progress")
                         .await?;
                 }
+                if event["type"] == "response.output_item.done" {
+                    ensure!(
+                        self.running
+                            && event["response_id"]
+                                .as_str()
+                                .is_none_or(|id| Some(id) == self.id.as_deref()),
+                        "Output item outside its active response"
+                    );
+                    self.completed_items.observe(&event)?;
+                }
                 self.messages.observe(&event);
                 let completed = self.messages.completed(&event);
                 self.peer
@@ -628,6 +649,7 @@ impl Driver {
                     return Ok(());
                 }
                 self.seen_completed.insert(id, response.clone());
+                self.completed_items.finish(&mut response)?;
                 self.messages.finish(&mut response);
                 ensure!(
                     response["id"].as_str() == self.id.as_deref(),
@@ -639,6 +661,8 @@ impl Driver {
                 if let Some(index) = output.iter().rposition(|v| v["type"] == "compaction") {
                     self.window_start = self.history.len() + index;
                 }
+                self.artwork
+                    .extend(output.iter().filter_map(crate::media::artwork_observation));
                 self.history.extend(history::responses(output));
                 self.needs_tools = output.iter().any(|v| {
                     matches!(

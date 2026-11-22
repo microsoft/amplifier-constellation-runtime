@@ -89,6 +89,9 @@ pub struct Provider {
     /// This installation's separately authorized ChatGPT account, never Codex credentials.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chatgpt_credentials_file: Option<PathBuf>,
+    /// Host-managed Codex subscription credentials, outside workspace grants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_credentials_file: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub copilot: Option<crate::copilot::Bridge>,
     #[serde(default)]
@@ -202,6 +205,7 @@ pub enum ProviderAuth {
     ApiKey,
     None,
     Chatgpt,
+    Codex,
 }
 impl ProviderKind {
     pub fn id(self) -> &'static str {
@@ -248,6 +252,7 @@ impl Provider {
             reasoning_effort: (kind == Openai).then(|| "medium".into()),
             auth: ProviderAuth::Auto,
             chatgpt_credentials_file: None,
+            codex_credentials_file: None,
             copilot: None,
             thinking_budget_tokens: None,
             api_version: None,
@@ -291,6 +296,7 @@ impl Provider {
             api_version: &self.api_version,
             chatgpt_credentials_file: (self.auth == ProviderAuth::Chatgpt)
                 .then_some(&self.chatgpt_credentials_file),
+            codex_credentials_file: self.codex_credentials_file.as_ref(),
         }
     }
 }
@@ -304,6 +310,8 @@ struct ProviderIdentity<'a> {
     api_version: &'a Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     chatgpt_credentials_file: Option<&'a Option<PathBuf>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    codex_credentials_file: Option<&'a PathBuf>,
 }
 #[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -439,12 +447,18 @@ impl Config {
                 !home.starts_with(&root) && !root.starts_with(&home),
                 "Additional workspaces must not expose runtime state or credentials"
             );
-            for protected in self.provider.chatgpt_credentials_file.iter().chain(
-                self.provider
-                    .copilot
-                    .iter()
-                    .flat_map(|bridge| [&bridge.python, &bridge.script]),
-            ) {
+            for protected in self
+                .provider
+                .chatgpt_credentials_file
+                .iter()
+                .chain(self.provider.codex_credentials_file.iter())
+                .chain(
+                    self.provider
+                        .copilot
+                        .iter()
+                        .flat_map(|bridge| [&bridge.python, &bridge.script]),
+                )
+            {
                 ensure!(
                     !std::fs::canonicalize(protected)?.starts_with(&root),
                     "Additional workspaces must not expose provider credentials or bridge code"
@@ -460,7 +474,7 @@ impl Config {
                 && (self.provider.kind == ProviderKind::Mock
                     || matches!(
                         self.provider.auth,
-                        ProviderAuth::None | ProviderAuth::Chatgpt
+                        ProviderAuth::None | ProviderAuth::Chatgpt | ProviderAuth::Codex
                     )))
                 || (!self.provider.api_key_env.is_empty()
                     && self
@@ -470,6 +484,31 @@ impl Config {
                         .all(|c| c.is_ascii_alphanumeric() || c == b'_')),
             "Invalid API key environment name"
         );
+        if self.provider.auth == ProviderAuth::Codex {
+            ensure!(
+                self.provider.kind == ProviderKind::Openai
+                    && self.provider.endpoint == "https://chatgpt.com/backend-api/codex/responses"
+                    && self.provider.tls_ca_file.is_none()
+                    && self.provider.api_version.is_none(),
+                "Codex subscription requires its fixed HTTPS Responses endpoint"
+            );
+            let path = self
+                .provider
+                .codex_credentials_file
+                .as_ref()
+                .context("Select a Codex credential file")?;
+            ensure!(
+                path.is_absolute()
+                    && path.is_file()
+                    && !std::fs::canonicalize(path)?.starts_with(&workspace),
+                "Codex credentials must be an existing file outside the workspace"
+            );
+        } else {
+            ensure!(
+                self.provider.codex_credentials_file.is_none(),
+                "Codex credentials require auth=codex"
+            );
+        }
         if self.provider.auth == ProviderAuth::Chatgpt {
             ensure!(
                 self.provider.kind == ProviderKind::Openai

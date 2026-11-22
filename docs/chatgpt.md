@@ -33,3 +33,23 @@ The runtime verifies signature, issuer, audience, expiry, nonce, state, and PKCE
 Validation covers callback rejection, local PKCE flow, JWT signature and claim verification, and configuration boundaries. **An actual user sign-in, plan entitlement, refresh, and inference remain to be exercised with new user consent.** These are not established by protocol tests or by the presence of an API key.
 
 Official references: [overview](https://developers.openai.com/cookbook/articles/sign-in-with-chatgpt), [registration and sign-in](https://developers.openai.com/siwc/token-sharing-open-source/sign-in), [models and inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference), and [self-hosted VMs](https://developers.openai.com/siwc/token-sharing-open-source/self-hosted-vms).
+
+## Host-managed Codex subscription
+
+An installation that already manages a Codex subscription login can select it
+explicitly with `--provider openai --auth codex --codex-credentials-file PATH
+--endpoint https://chatgpt.com/backend-api/codex/responses --model MODEL`.
+The credential owner handles login and refresh. Runtime reads the selected
+file when opening a connection. It accepts the Codex tokens object containing
+`account_id` and `access_token`, either at the top level or under `tokens`.
+Keep this private file outside every granted workspace. Public ChatGPT sign-in
+and Codex have separate registrations, endpoints and credential formats.
+
+Enable hosted artwork with `provider.native.image_input: true` and
+`provider.native.tools: [{"type":"image_generation","output_format":"png"}]`.
+The engine submits the tool on the ordinary model request. The client receives
+the original as ACP media with a Runtime artifact ID. An incremental model
+continuation receives that ID and an inspection preview. Full history retains
+the original for replay and `workspace_save_artifact`. A completed image-only
+Codex response allows one inspection step within the existing turn budget.
+Tool availability depends on the selected model and subscription.

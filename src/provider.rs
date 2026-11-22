@@ -1,4 +1,5 @@
 mod compaction;
+mod completed_items;
 mod history;
 mod identity;
 mod rejection;
@@ -33,8 +34,10 @@ impl Provider {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let p = &config.provider;
         let key = if p.kind == ProviderKind::Mock
-            || matches!(p.auth, ProviderAuth::None | ProviderAuth::Chatgpt)
-        {
+            || matches!(
+                p.auth,
+                ProviderAuth::None | ProviderAuth::Chatgpt | ProviderAuth::Codex
+            ) {
             None
         } else {
             std::env::var(&p.api_key_env)
@@ -42,8 +45,10 @@ impl Provider {
                 .map(|v| v.trim().to_owned())
                 .filter(|s| !s.is_empty())
         };
-        let required = !matches!(p.auth, ProviderAuth::None | ProviderAuth::Chatgpt)
-            && p.kind != ProviderKind::Mock
+        let required = !matches!(
+            p.auth,
+            ProviderAuth::None | ProviderAuth::Chatgpt | ProviderAuth::Codex
+        ) && p.kind != ProviderKind::Mock
             && (p.auth != ProviderAuth::Auto
                 || matches!(
                     p.kind,
@@ -90,6 +95,26 @@ impl Provider {
         mut request: reqwest::RequestBuilder,
     ) -> Result<reqwest::RequestBuilder> {
         let p = &self.config.provider;
+        if p.auth == ProviderAuth::Codex {
+            let path = p
+                .codex_credentials_file
+                .as_ref()
+                .context("Codex credential file is required")?;
+            let record: Value = serde_json::from_slice(&std::fs::read(path)?)
+                .context("Invalid Codex credential file")?;
+            let tokens = record.get("tokens").unwrap_or(&record);
+            let field = |key: &str| {
+                tokens[key]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .context("Codex subscription sign-in is incomplete")
+            };
+            return Ok(request
+                .bearer_auth(field("access_token")?)
+                .header("ChatGPT-Account-Id", field("account_id")?)
+                .header("OpenAI-Beta", "responses_websockets=2026-02-06")
+                .header("OpenAI-Originator", "codex"));
+        }
         if p.auth == ProviderAuth::Chatgpt {
             let token = crate::chatgpt::access_token(
                 p.chatgpt_credentials_file
@@ -158,7 +183,7 @@ impl Provider {
                     "Cannot send another provider's state to Responses"
                 );
                 let mut b = json!({"model":p.model,"instructions":instructions,"input":history::responses(items),"tools":tools,"max_output_tokens":max,"store":false,"stream":true});
-                if p.auth == ProviderAuth::Chatgpt {
+                if matches!(p.auth, ProviderAuth::Chatgpt | ProviderAuth::Codex) {
                     b.as_object_mut().unwrap().remove("max_output_tokens");
                 }
                 if p.kind != ProviderKind::Vllm {
@@ -242,7 +267,9 @@ impl Provider {
             body.as_object_mut().unwrap().remove("tools");
         }
         if !p.native.tools.is_empty() {
-            if matches!(p.kind, ProviderKind::Openai | ProviderKind::AzureOpenai) {
+            if matches!(p.kind, ProviderKind::Openai | ProviderKind::AzureOpenai)
+                && p.auth != ProviderAuth::Codex
+            {
                 body["max_tool_calls"] = json!(self.config.limits.max_tool_calls);
             }
             if !body["tools"].is_array() {
