@@ -276,7 +276,8 @@ impl Store {
             id,
             &provider.fingerprint(),
             Some(&provider.insertion_order_fingerprint()),
-            provider.kind == crate::config::ProviderKind::Openai,
+            provider.kind == crate::config::ProviderKind::Openai
+                && provider.auth != crate::config::ProviderAuth::Codex,
         )
     }
 

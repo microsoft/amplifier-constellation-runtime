@@ -171,6 +171,9 @@ struct ProviderOptions {
     chatgpt_credentials_file: Option<PathBuf>,
     #[arg(long)]
     codex_credentials_file: Option<PathBuf>,
+    /// Stable Codex account selected by the credential owner.
+    #[arg(long)]
+    codex_account_id: Option<String>,
     #[arg(long, requires = "copilot_bridge")]
     copilot_python: Option<PathBuf>,
     #[arg(long, requires = "copilot_python")]
@@ -222,6 +225,7 @@ impl ProviderOptions {
         p.auth = self.auth;
         p.chatgpt_credentials_file = self.chatgpt_credentials_file;
         p.codex_credentials_file = self.codex_credentials_file;
+        p.codex_account_id = self.codex_account_id;
         p.copilot = self
             .copilot_python
             .zip(self.copilot_bridge)

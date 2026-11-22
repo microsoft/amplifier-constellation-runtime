@@ -92,6 +92,9 @@ pub struct Provider {
     /// Host-managed Codex subscription credentials, outside workspace grants.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_credentials_file: Option<PathBuf>,
+    /// Stable account selected by the host, independent of token rotation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_account_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub copilot: Option<crate::copilot::Bridge>,
     #[serde(default)]
@@ -253,6 +256,7 @@ impl Provider {
             auth: ProviderAuth::Auto,
             chatgpt_credentials_file: None,
             codex_credentials_file: None,
+            codex_account_id: None,
             copilot: None,
             thinking_budget_tokens: None,
             api_version: None,
@@ -297,6 +301,7 @@ impl Provider {
             chatgpt_credentials_file: (self.auth == ProviderAuth::Chatgpt)
                 .then_some(&self.chatgpt_credentials_file),
             codex_credentials_file: self.codex_credentials_file.as_ref(),
+            codex_account_id: self.codex_account_id.as_deref(),
         }
     }
 }
@@ -312,6 +317,8 @@ struct ProviderIdentity<'a> {
     chatgpt_credentials_file: Option<&'a Option<PathBuf>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     codex_credentials_file: Option<&'a PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    codex_account_id: Option<&'a str>,
 }
 #[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -486,6 +493,15 @@ impl Config {
         );
         if self.provider.auth == ProviderAuth::Codex {
             ensure!(
+                self.provider
+                    .codex_account_id
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty()
+                        && id.trim() == id
+                        && reqwest::header::HeaderValue::from_str(id).is_ok()),
+                "Select a valid Codex account ID"
+            );
+            ensure!(
                 self.provider.kind == ProviderKind::Openai
                     && self.provider.endpoint == "https://chatgpt.com/backend-api/codex/responses"
                     && self.provider.tls_ca_file.is_none()
@@ -505,7 +521,8 @@ impl Config {
             );
         } else {
             ensure!(
-                self.provider.codex_credentials_file.is_none(),
+                self.provider.codex_credentials_file.is_none()
+                    && self.provider.codex_account_id.is_none(),
                 "Codex credentials require auth=codex"
             );
         }

@@ -421,7 +421,10 @@ impl Turn<'_> {
                 .await
             {
                 Ok(response) => response,
-                Err(error) if error.is::<crate::provider::ResumeArtworkLocally>() => continue,
+                Err(error) if error.is::<crate::provider::ResumeArtworkLocally>() => {
+                    tool_results_known = false;
+                    continue;
+                }
                 Err(error) => return Err(error),
             };
             self.store.event(

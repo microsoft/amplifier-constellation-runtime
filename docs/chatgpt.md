@@ -37,10 +37,10 @@ Official references: [overview](https://developers.openai.com/cookbook/articles/
 ## Host-managed Codex subscription
 
 An installation that already manages a Codex subscription login can select it
-explicitly with `--provider openai --auth codex --codex-credentials-file PATH
+explicitly with `--provider openai --auth codex --codex-account-id ACCOUNT_ID --codex-credentials-file PATH
 --endpoint https://chatgpt.com/backend-api/codex/responses --model MODEL`.
 The credential owner handles login and refresh. Runtime reads the selected
-file when opening a connection. It accepts the Codex tokens object containing
+file when preparing a new authenticated request, checks its account ID against the selected account, and takes both the bearer token and account header from that same snapshot. WebSocket rotations within a logical turn reuse its already authenticated connection request. It accepts the Codex tokens object containing
 `account_id` and `access_token`, either at the top level or under `tokens`.
 Keep this private file outside every granted workspace. Public ChatGPT sign-in
 and Codex have separate registrations, endpoints and credential formats.
@@ -53,3 +53,20 @@ continuation receives that ID and an inspection preview. Full history retains
 the original for replay and `workspace_save_artifact`. A completed image-only
 Codex response allows one inspection step within the existing turn budget.
 Tool availability depends on the selected model and subscription.
+
+Runtime carries the model-call and local tool-call counters across connection
+rotation. The Codex subscription request sends no provider-side hosted-call
+or output-token cap. These counters bound different operations.
+
+The selected account ID participates in the session fingerprint. A token
+refresh for that account preserves continuity. Selecting a different account
+requires a new session. Development-only Codex sessions created before this
+binding have a path-only fingerprint and must start a new session; their
+history is retained. Other provider fingerprints are unchanged.
+
+Artwork recovery requires an acknowledged server failure explicitly tied to
+the active response, before any output. Partial images, populated terminal
+output, ambiguous failures and unsettled steering stop the turn. If recovery
+is admitted, the hosted image tool is removed for the rest of the turn. The
+failed operation remains uncertain even after a successful local tool call;
+a context limit then fails closed instead of offering a settled continuation.

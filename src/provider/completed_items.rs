@@ -33,16 +33,17 @@ impl CompletedItems {
         let terminal = response["output"]
             .as_array_mut()
             .context("Response output missing")?;
-        let mut merged_indices = HashSet::new();
+        let mut previous_index = None;
         for (position, item) in terminal.drain(..).enumerate() {
             let index = item["id"]
                 .as_str()
                 .and_then(|id| done.iter().find(|(_, v)| v["id"] == id).map(|(n, _)| *n))
                 .unwrap_or(position);
             ensure!(
-                merged_indices.insert(index),
-                "Duplicate terminal output index"
+                previous_index.is_none_or(|previous| previous < index),
+                "Terminal output indices must increase"
             );
+            previous_index = Some(index);
             if let Some(existing) = done.get(&index) {
                 ensure!(existing == &item, "Conflicting terminal output item");
             } else {
@@ -71,6 +72,27 @@ impl CompletedItems {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn terminal_order_must_agree_with_streamed_identities() {
+        let items = ["a", "b", "c"].map(|id| json!({"type":"function_call","id":id}));
+        for (indices, accepted) in [
+            (vec![2, 1, 0], false),
+            (vec![2, 0], false),
+            (vec![0, 2], true),
+        ] {
+            let mut c = CompletedItems::default();
+            for (index, item) in items.iter().enumerate() {
+                c.observe(&json!({"output_index":index,"item":item}))
+                    .unwrap();
+            }
+            let mut terminal =
+                json!({"output":indices.iter().map(|&i: &usize| &items[i]).collect::<Vec<_>>()});
+            assert_eq!(c.finish(&mut terminal).is_ok(), accepted);
+            if accepted {
+                assert_eq!(terminal["output"], json!(items));
+            }
+        }
+    }
     #[test]
     fn sparse_terminal_preserves_order_and_refuses_conflict_or_gaps() {
         let event = |n, id| json!({"output_index":n,"item":{"id":id,"type":"function_call"}});

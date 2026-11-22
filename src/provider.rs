@@ -118,9 +118,14 @@ impl Provider {
                     .filter(|s| !s.is_empty())
                     .context("Codex subscription sign-in is incomplete")
             };
+            let account = field("account_id")?;
+            ensure!(
+                Some(account) == p.codex_account_id.as_deref(),
+                "Codex credentials belong to a different account than this session"
+            );
             return Ok(request
                 .bearer_auth(field("access_token")?)
-                .header("ChatGPT-Account-Id", field("account_id")?)
+                .header("ChatGPT-Account-Id", account)
                 .header("OpenAI-Beta", "responses_websockets=2026-02-06")
                 .header("OpenAI-Originator", "codex"));
         }
@@ -674,6 +679,62 @@ mod tests {
         config.provider.token_limit_parameter = parameter;
         let provider = Provider::new(&config).unwrap();
         provider.request("", &[], &[]).unwrap().1
+    }
+
+    #[tokio::test]
+    async fn codex_refresh_preserves_selected_account_and_refuses_file_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("credential");
+        let mut config = Config::initial(directory.path().into(), "fixture".into(), "model".into());
+        config.provider.auth = ProviderAuth::Codex;
+        config.provider.codex_credentials_file = Some(path.clone());
+        config.provider.codex_account_id = Some("A".into());
+        let store = crate::store::Store::open(directory.path().join("engine")).unwrap();
+        let session = store
+            .create(directory.path().into(), crate::config::Mode::ReadOnly)
+            .unwrap();
+        store
+            .bind_configured_provider(&session.id, &config.provider)
+            .unwrap();
+        let provider = Provider::new(&config).unwrap();
+        let write_snapshot = |account, token| {
+            std::fs::write(
+                &path,
+                serde_json::to_vec(&json!({"tokens":{"account_id":account,"access_token":token}}))
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        for token in ["old", "refreshed"] {
+            write_snapshot("A", token);
+            let request = provider
+                .headers(provider.client.get(&config.provider.endpoint))
+                .await
+                .unwrap()
+                .build()
+                .unwrap();
+            assert_eq!(request.headers()["ChatGPT-Account-Id"], "A");
+            assert_eq!(
+                request.headers()["Authorization"].to_str().unwrap(),
+                format!("Bearer {token}")
+            );
+            store
+                .bind_configured_provider(&session.id, &config.provider)
+                .unwrap();
+        }
+        write_snapshot("B", "new");
+        assert!(
+            provider
+                .headers(provider.client.get(&config.provider.endpoint))
+                .await
+                .is_err()
+        );
+        config.provider.codex_account_id = Some("B".into());
+        assert!(
+            store
+                .bind_configured_provider(&session.id, &config.provider)
+                .is_err()
+        );
     }
 
     #[test]

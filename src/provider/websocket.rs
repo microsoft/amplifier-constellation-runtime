@@ -267,6 +267,25 @@ fn failure_code(error: &anyhow::Error) -> &'static str {
         _ => "request_failed",
     }
 }
+fn attributed_empty_failure(event: &Value, active: Option<&str>) -> bool {
+    let Some(active) = active.filter(|id| !id.is_empty()) else {
+        return false;
+    };
+    if event["type"] == "response.failed" && event.pointer("/response/output").is_none() {
+        return false;
+    }
+    let ids = [event.pointer("/response/id"), event.get("response_id")];
+    ids.iter().any(Option::is_some)
+        && ids
+            .into_iter()
+            .flatten()
+            .all(|id| id.as_str() == Some(active))
+        && [event.pointer("/response/output"), event.get("output")]
+            .into_iter()
+            .flatten()
+            .all(|output| output.as_array().is_some_and(Vec::is_empty))
+}
+
 impl Driver {
     async fn send(&mut self, value: Value) -> Result<()> {
         tokio::time::timeout(
@@ -558,10 +577,7 @@ impl Driver {
             && !self.auto_wait
             && self.waiter.is_some()
             && self.created < self.max
-            && event["response"]["id"]
-                .as_str()
-                .or(event["response_id"].as_str())
-                .is_none_or(|id| Some(id) == self.id.as_deref())
+            && attributed_empty_failure(&event, self.id.as_deref())
         {
             self.rotate_socket().await?;
             self.running = false;
@@ -578,9 +594,15 @@ impl Driver {
             }
             return Ok(());
         }
-        if event_type.starts_with("response.output_") || event_type == "response.refusal.delta" {
-            self.received_output = true;
-        }
+        // Only known lifecycle events certify that no output has appeared.
+        // Unknown provider extensions may carry content or hosted effects.
+        self.received_output |= match event_type {
+            "response.created" | "response.in_progress" => event
+                .pointer("/response/output")
+                .is_some_and(|output| !output.as_array().is_some_and(Vec::is_empty)),
+            "error" | "response.failed" => false,
+            _ => true,
+        };
         match event_type {
             "response.created" => {
                 let id = event["response"]["id"]
