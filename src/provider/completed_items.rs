@@ -1,7 +1,7 @@
 //! Some Responses endpoints finish with a sparse or empty output snapshot.
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 #[derive(Default)]
 pub(super) struct CompletedItems(BTreeMap<usize, Value>);
@@ -33,18 +33,30 @@ impl CompletedItems {
         let terminal = response["output"]
             .as_array_mut()
             .context("Response output missing")?;
+        let mut merged_indices = HashSet::new();
         for (position, item) in terminal.drain(..).enumerate() {
             let index = item["id"]
                 .as_str()
                 .and_then(|id| done.iter().find(|(_, v)| v["id"] == id).map(|(n, _)| *n))
                 .unwrap_or(position);
+            ensure!(
+                merged_indices.insert(index),
+                "Duplicate terminal output index"
+            );
             if let Some(existing) = done.get(&index) {
                 ensure!(existing == &item, "Conflicting terminal output item");
             } else {
                 done.insert(index, item);
             }
         }
+        let mut identities = HashSet::new();
         for (index, item) in done {
+            if let Some(id) = item["id"].as_str() {
+                ensure!(
+                    identities.insert(id.to_owned()),
+                    "Duplicate completed output identity"
+                );
+            }
             ensure!(
                 index == terminal.len(),
                 "Incomplete response output indices"
