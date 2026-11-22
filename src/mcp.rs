@@ -109,6 +109,9 @@ struct Connection {
     transport: Option<Transport>,
     next: u64,
     pending: Option<u64>,
+    // Keep the original uncertain calls and their cancellation evidence until
+    // turn cleanup, separately from the request currently using the transport.
+    interrupted_http: Vec<(String, CancellationReport)>,
 }
 
 enum Transport {
@@ -166,7 +169,7 @@ impl Tools {
             let connection = async {
                 let mut definitions = BTreeMap::new();
                 let mut peer = Connection::open(spec).await?;
-                let init=peer.request("initialize",json!({"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"agent-runtime","version":env!("CARGO_PKG_VERSION")}})).await?;
+                let init=peer.request("initialize",&json!({"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"agent-runtime","version":env!("CARGO_PKG_VERSION")}})).await?;
                 if let Some(Transport::Http { protocol, .. }) = &mut peer.transport {
                     let version = init["protocolVersion"]
                         .as_str()
@@ -196,7 +199,7 @@ impl Tools {
                     } else {
                         json!({"cursor":cursor})
                     };
-                    let list = peer.request("tools/list", params).await?;
+                    let list = peer.request("tools/list", &params).await?;
                     for tool in list["tools"]
                         .as_array()
                         .context("MCP did not return a tool list")?
@@ -270,7 +273,7 @@ impl Tools {
         self.peers[tool.index]
             .lock()
             .await
-            .request("tools/call", json!({"name":tool.name,"arguments":args}))
+            .call(tool, args, self.server_indices[tool.index])
             .await
     }
 
@@ -280,10 +283,15 @@ impl Tools {
     pub async fn cancel_pending(&self) -> Vec<CancellationReport> {
         futures_util::future::join_all(self.peers.iter().enumerate().map(
             |(index, peer)| async move {
-                peer.lock()
-                    .await
-                    .cancel_pending(self.server_indices[index])
-                    .await
+                let mut peer = peer.lock().await;
+                let pending = peer.cancel_pending(self.server_indices[index]).await;
+                let mut reports: Vec<_> = peer
+                    .interrupted_http
+                    .drain(..)
+                    .map(|(_, report)| report)
+                    .collect();
+                reports.extend(pending);
+                reports
             },
         ))
         .await
@@ -298,6 +306,7 @@ impl Connection {
             transport: Some(Transport::open(spec).await?),
             next: 1,
             pending: None,
+            interrupted_http: Vec::new(),
         })
     }
 
@@ -310,7 +319,44 @@ impl Connection {
         Ok(())
     }
 
-    async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
+    async fn call(&mut self, tool: &Tool, args: Value, server_index: usize) -> Result<Value> {
+        let params = json!({"name": tool.name, "arguments": args});
+        if !self.interrupted_http.is_empty() {
+            // This hint can only restrict dispatch. The engine already applied
+            // its ordinary mode, endpoint trust and permission checks.
+            let key = crate::approval_policy::digest("interrupted-http-tool", &params);
+            ensure!(
+                tool.readonly && !self.interrupted_http.iter().any(|(call, _)| call == &key),
+                "A prior MCP call has an unknown outcome; only a distinct read may proceed in this turn. This call was not sent"
+            );
+        }
+        let id = self.next;
+        let result = self.request("tools/call", &params).await;
+        if self.pending == Some(id)
+            && let Some(transport @ Transport::Http { .. }) = &mut self.transport
+        {
+            // The exchange returned without a terminal response. Each HTTP
+            // request has its own framing. A dropped request future never
+            // reaches here and still requires the ordinary pending cleanup.
+            self.pending = None;
+            self.interrupted_http.push((
+                crate::approval_policy::digest("interrupted-http-tool", &params),
+                CancellationReport {
+                    server_index,
+                    request_id: id,
+                    transport: "http",
+                    notification_sent: false,
+                    quarantined: false,
+                    outcome_uncertain: true,
+                },
+            ));
+            let (_, report) = self.interrupted_http.last_mut().unwrap();
+            report.notification_sent = transport.notify_cancelled(id).await;
+        }
+        result
+    }
+
+    async fn request(&mut self, method: &str, params: &Value) -> Result<Value> {
         ensure!(
             self.pending.is_none(),
             "Previous MCP request was interrupted; its outcome is unknown and it must not be replayed automatically"
@@ -346,11 +392,7 @@ impl Connection {
         // future must also drop/kill stdio, never restore its partial frame.
         let mut transport = self.transport.take()?;
         let stdio = matches!(&transport, Transport::Stdio { .. });
-        let notification = json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":request_id,"reason":"Client stopped waiting; the operation outcome remains uncertain"}});
-        let notification_sent = matches!(
-            tokio::time::timeout(CANCEL_TIMEOUT, transport.exchange(notification)).await,
-            Ok(Ok(_))
-        );
+        let notification_sent = transport.notify_cancelled(request_id).await;
         if let Transport::Stdio { child, .. } = &mut transport {
             if notification_sent {
                 // Allow a cooperating process to observe the notification and
@@ -374,6 +416,14 @@ impl Connection {
 }
 
 impl Transport {
+    async fn notify_cancelled(&mut self, request_id: u64) -> bool {
+        let notification = json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":request_id,"reason":"Client stopped waiting; the operation outcome remains uncertain"}});
+        matches!(
+            tokio::time::timeout(CANCEL_TIMEOUT, self.exchange(notification)).await,
+            Ok(Ok(_))
+        )
+    }
+
     fn approval_binding(&self) -> Option<&str> {
         match self {
             Self::Http {

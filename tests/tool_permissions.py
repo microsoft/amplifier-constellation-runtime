@@ -7,11 +7,13 @@ it is a test consumer, never the recommended permission policy.
 import copy
 import json
 import os
+import sqlite3
 import subprocess
 import tempfile
 import threading
 import unittest
 import uuid
+from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -69,7 +71,9 @@ class Handler(ResponsesWebSocketMixin, BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         if self.path == "/mcp":
             method = body.get("method")
-            if method == "notifications/initialized":
+            if hasattr(self.server, "mcp_traffic"):
+                self.server.mcp_traffic.append((method, self.headers.get("Mcp-Session-Id")))
+            if method in ("notifications/initialized", "notifications/cancelled"):
                 self.send_response(202)
                 self.end_headers()
                 return
@@ -80,9 +84,21 @@ class Handler(ResponsesWebSocketMixin, BaseHTTPRequestHandler):
                 result = {"tools": [{"name": "observe", "description": "Fixture observation",
                                      "inputSchema": getattr(self.server, "mcp_schema", {"type": "object"}),
                                      "annotations": {"readOnlyHint": True}}]}
+                if hasattr(self.server, "recorded_values"):
+                    result["tools"].append({"name": "record", "description": "Append a fixture value",
+                                            "inputSchema": {"type": "object", "required": ["value"],
+                                                            "properties": {"value": {"type": "string"}}}})
             elif method == "tools/call":
                 self.server.effects.append(copy.deepcopy(body["params"]))
-                result = {"content": [{"type": "text", "text": "Fixture observation returned"}]}
+                if body["params"]["name"] == "record":
+                    self.server.recorded_values.append(body["params"]["arguments"]["value"])
+                if body["params"] == getattr(self.server, "lose_response_for", None):
+                    self.server.interrupted_request_id = body["id"]
+                    self.close_connection = True
+                    return  # The tool ran; the client receives no HTTP response.
+                observation = (json.dumps(self.server.recorded_values) if hasattr(self.server, "recorded_values")
+                               else "Fixture observation returned")
+                result = {"content": [{"type": "text", "text": observation}]}
             else:
                 result = {}
             self.reply(body, result)
@@ -318,6 +334,90 @@ class ToolPermissions(unittest.TestCase):
         self.assert_bound_identity(client, {"version": 1, "kind": "mcp", "name": "observe", "server": "minecraft"})
         self.assertEqual(client.callbacks[0]["params"]["toolCall"]["rawInput"],
                          {"server": "minecraft", "tool": "observe", "arguments": args})
+
+    def test_interrupted_write_remains_unknown_and_distinct_read_uses_same_attachment(self):
+        self.server.recorded_values = []
+        self.server.mcp_traffic = []
+        client = self.client(mcp_server="fixture")
+        args = {"value": "first entry"}
+        self.server.lose_response_for = {"name": "record", "arguments": args}
+        label, result = self.prompt(client, [self.step("mcp_0_record", args),
+                                             self.step("mcp_0_observe", {}),
+                                             self.step("mcp_0_record", args),
+                                             self.step("mcp_0_record", {"value": "second entry"})], approve=True)
+        self.assertEqual(result["result"]["stopReason"], "end_turn")
+        self.assertEqual(self.server.effects,
+                         [{"name": "record", "arguments": args}, {"name": "observe", "arguments": {}}])
+        self.assertEqual(self.server.recorded_values, ["first entry"])
+        traffic = self.server.mcp_traffic
+        self.assertEqual([sid for method, sid in traffic if method == "initialize"], [None])
+        self.assertEqual([sid for method, sid in traffic if method == "tools/list"], ["permission-fixture"])
+        self.assertEqual([sid for method, sid in traffic if method == "tools/call"], ["permission-fixture"] * 2)
+
+        write_id, read_id, repeat_id, changed_id = [f"{label}-call-{i}" for i in range(4)]
+        permissions = [p["params"] for p in client.callbacks]
+        self.assertTrue(all(p["sessionId"] == client.session for p in permissions))
+        self.assertEqual([p["toolCall"]["toolCallId"] for p in permissions],
+                         [write_id, read_id, repeat_id, changed_id])
+
+        def terminal_receipts(connection):
+            updates = [f["params"]["update"] for f in connection.updates
+                       if f.get("method") == "session/update" and f["params"]["sessionId"] == client.session]
+            return [(u["toolCallId"], u["status"], json.loads(u["content"][0]["content"]["text"]))
+                    for u in updates if u.get("sessionUpdate") == "tool_call_update"
+                    and u.get("status") in ("failed", "completed")]
+
+        receipts = terminal_receipts(client)
+        self.assertEqual([(call_id, status) for call_id, status, _ in receipts],
+                         [(write_id, "failed"), (read_id, "completed"), (repeat_id, "failed"),
+                          (changed_id, "failed")])
+        self.assertIn("unknown", receipts[0][2]["error"].lower())
+        self.assertEqual(json.loads(receipts[1][2]["content"][0]["text"]), ["first entry"])
+        self.assertTrue(receipts[2][2].get("error"))
+        self.assertTrue(receipts[3][2].get("error"))
+        with closing(sqlite3.connect(self.home / "history.sqlite3")) as db:
+            reports = [json.loads(row[0]) for row in db.execute(
+                "SELECT data FROM events WHERE session=? AND kind='tool.cancellation'", (client.session,))]
+        self.assertEqual([(r["request_id"], r["transport"], r["outcome_uncertain"]) for r in reports],
+                         [(self.server.interrupted_request_id, "http", True)])
+
+        client.close()
+        self.clients.remove(client)
+        resumed = PermissionClient(self.home)
+        self.clients.append(resumed)
+        self.assertIn("result", resumed.call("initialize", {"protocolVersion": 1, "clientCapabilities": {}}))
+        loaded = resumed.call("session/load", {"cwd": str(self.work), "sessionId": client.session,
+                              "mcpServers": [{"type": "http", "name": "fixture", "url": self.url + "/mcp",
+                                              "headers": []}]})
+        self.assertIn("result", loaded)
+        self.assertEqual(terminal_receipts(resumed), receipts)
+        self.assertEqual(resumed.callbacks, [])
+        self.assertEqual(len(self.server.effects), 2, "Loading history replayed an MCP call")
+
+    def test_interrupted_read_cannot_be_replayed_but_another_read_can_proceed(self):
+        self.server.recorded_values = []
+        client = self.client(mcp_server="fixture")
+        args = {"page": 1, "limit": 3}
+        self.server.lose_response_for = {"name": "observe", "arguments": args}
+        new_args = {"page": 2, "limit": 3}
+        _, result = self.prompt(client, [self.step("mcp_0_observe", args),
+                                         self.step("mcp_0_observe", {"limit": 3, "page": 1}),
+                                         self.step("mcp_0_observe", new_args)], approve=True)
+        self.assertEqual(result["result"]["stopReason"], "end_turn")
+        self.assertEqual(self.server.effects, [self.server.lose_response_for,
+                                               {"name": "observe", "arguments": new_args}])
+        self.assertEqual(len(client.callbacks), 3)
+
+        write_args = {"value": "new turn entry"}
+        label, result = self.prompt(client, [self.step("mcp_0_record", write_args)], approve=True)
+        self.assertEqual(result["result"]["stopReason"], "end_turn")
+        self.assertEqual(len(client.callbacks), 4)
+        approval = client.callbacks[-1]["params"]
+        self.assertEqual((approval["sessionId"], approval["toolCall"]["toolCallId"]),
+                         (client.session, label + "-call-0"))
+        self.assertEqual(len(self.server.effects), 3)
+        self.assertEqual(self.server.effects[-1], {"name": "record", "arguments": write_args})
+        self.assertEqual(self.server.recorded_values, ["new turn entry"])
 
     def test_registry_identity_overrides_provider_and_argument_identity_claims(self):
         client = self.client(mcp_server="other-service")
